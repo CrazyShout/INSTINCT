@@ -1,14 +1,17 @@
-name: opv2v_point_pillar_lidar_late_fusion
-root_dir: "dataset/OPV2V/train"
-validate_dir: "dataset/OPV2V/validate"
-test_dir: "dataset/OPV2V/test"
+name: opv2v_point_pillar_lidar_late_fusion_origin
+root_dir: "my_opv2v/train"
+validate_dir: "my_opv2v/validate"
+test_dir: "my_opv2v/test"
+# root_dir: "my_v2xset/train"
+# validate_dir: "my_v2xset/validate"
+# test_dir: "my_v2xset/test"
 
 yaml_parser: "load_point_pillar_params"
 train_params:
-  batch_size: &batch_size 8
-  epoches: 15
-  eval_freq: 2
-  save_freq: 2
+  batch_size: &batch_size 16
+  epoches: 60
+  eval_freq: 1
+  save_freq: 1
 
 input_source: ['lidar']
 label_type: 'lidar'
@@ -84,13 +87,15 @@ model:
       num_features: 64
 
     base_bev_backbone:
-      layer_nums: [3, 5, 8]
+      resnet: true
+      layer_nums: [3, 4, 5]
       layer_strides: [2, 2, 2]
       num_filters: [64, 128, 256]
       upsample_strides: [1, 2, 4]
       num_upsample_filter: [128, 128, 128]
 
     shrink_header:
+      use_atten: false
       kernal_size: [ 3 ]
       stride: [ 1 ]
       padding: [ 1 ]

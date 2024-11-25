@@ -1,0 +1,16 @@
+CONDA_MKL_INTERFACE_LAYER_BACKUP=
+CONDA_EXE=/public/home/lilingzhi/anaconda3/bin/conda
+CONDA_PREFIX=/public/home/lilingzhi/anaconda3/envs/coalign
+CONDA_PROMPT_MODIFIER=(coalign) 
+JUPYTER_CONFIG_PATH=/etc
+_CE_CONDA=
+CPLUS_INCLUDE_PATH=:/public/home/lilingzhi/anaconda3/envs/cobevflow/include:/usr/local/cuda/targets/x86_64-linux/include/:/public/home/lilingzhi/anaconda3/envs/cobevflow/include:/usr/local/cuda/targets/x86_64-linux/include/
+LIBRARY_PATH=/usr/local/cuda/lib64/stubs::/public/home/lilingzhi/anaconda3/envs/cobevflow/lib:/public/home/lilingzhi/anaconda3/envs/cobevflow/lib
+CONDA_SHLVL=2
+CONDA_PYTHON_EXE=/public/home/lilingzhi/anaconda3/bin/python
+LD_LIBRARY_PATH=/usr/local/cuda/lib64:/public/home/lilingzhi/anaconda3/envs/cobevflow/x86_64-conda-linux-gnu/sysroot/usr/lib64/:/path/to/anaconda3/envs/cobevflow/lib:/usr/local/cuda/compat/lib.real:/usr/local/cuda/lib64:/public/home/lilingzhi/anaconda3/envs/cobevflow/x86_64-conda-linux-gnu/sysroot/usr/lib64/:/path/to/anaconda3/envs/cobevflow/lib:/usr/local/lib/python3.8/dist-packages/torch/lib:/usr/local/lib/python3.8/dist-packages/torch_tensorrt/lib:/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/public/home/lilingzhi/anaconda3/envs/cobevflow/lib:/public/home/lilingzhi/anaconda3/envs/cobevflow/lib
+CONDA_DEFAULT_ENV=coalign
+_CUDA_COMPAT_PATH=/usr/local/cuda/compat
+PATH=/usr/local/cuda/bin:/public/home/lilingzhi/anaconda3/envs/coalign/bin:/usr/local/bin:/usr/local/lib/python3.8/dist-packages/torch_tensorrt/bin:/usr/local/mpi/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/ucx/bin:/opt/tensorrt/bin
+C_INCLUDE_PATH=:/public/home/lilingzhi/anaconda3/envs/cobevflow/include:/usr/local/cuda/targets/x86_64-linux/include/:/public/home/lilingzhi/anaconda3/envs/cobevflow/include:/usr/local/cuda/targets/x86_64-linux/include/
+CONDA_PREFIX_1=/public/home/lilingzhi/anaconda3

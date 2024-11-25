@@ -295,13 +295,13 @@ class Canvas_BEV_heading_right(object):
         self.canvas_bg_color = canvas_bg_color
         self.left_hand = left_hand
         
-        self.clear_canvas()
+        self.clear_canvas() # 设置一个RGB canvas
     
     def get_canvas(self):
         return self.canvas
 
     def clear_canvas(self):
-        self.canvas = np.zeros((*self.canvas_shape, 3), dtype=np.uint8)
+        self.canvas = np.zeros((*self.canvas_shape, 3), dtype=np.uint8) # 800，2800， 3
         self.canvas[..., :] = self.canvas_bg_color
 
     def get_canvas_coords(self, xy):
@@ -319,23 +319,23 @@ class Canvas_BEV_heading_right(object):
         """
         xy = np.copy(xy) # prevent in-place modifications
 
-        x = xy[:, 0]
-        y = xy[:, 1]
+        x = xy[:, 0] # （N, ）
+        y = xy[:, 1] # （N, ）
 
-        if not self.left_hand:
+        if not self.left_hand: # 如果是右手坐标系，则y反向
             y = -y
 
         # Get valid mask
         valid_mask = ((x > self.canvas_x_range[0]) & 
                       (x < self.canvas_x_range[1]) &
                       (y > self.canvas_y_range[0]) & 
-                      (y < self.canvas_y_range[1]))
+                      (y < self.canvas_y_range[1])) # 检查在坐标范围内的mask，（N, ）
 
         # Rescale points
         # They are exactly lidar point coordinate
         x = ((x - self.canvas_x_range[0]) / 
-             (self.canvas_x_range[1] - self.canvas_x_range[0]))
-        x = x * self.canvas_shape[1]
+             (self.canvas_x_range[1] - self.canvas_x_range[0])) # 减去最小值除以长度，得到比值
+        x = x * self.canvas_shape[1] # 比值乘以实际的canvas长度，得到在canvas中的位置
         x = np.clip(np.around(x), 0, 
                     self.canvas_shape[1] - 1).astype(np.int32) # [0,2800-1]
                     
@@ -352,7 +352,7 @@ class Canvas_BEV_heading_right(object):
         # |
         # y
 
-        canvas_xy = np.stack([x, y], axis=1)
+        canvas_xy = np.stack([x, y], axis=1) # N，2
 
         return canvas_xy, valid_mask
                                       
@@ -387,7 +387,7 @@ class Canvas_BEV_heading_right(object):
             
         if colors is None:
             colors = np.full(
-                (len(canvas_xy), 3), fill_value=255, dtype=np.uint8)
+                (len(canvas_xy), 3), fill_value=255, dtype=np.uint8) # 如果没有设定颜色，就设定成（N，3）然后颜色是白色
         elif isinstance(colors, tuple):
             assert len(colors) == 3
             colors_tmp = np.zeros((len(canvas_xy), 3), dtype=np.uint8)
@@ -400,7 +400,7 @@ class Canvas_BEV_heading_right(object):
             colors = matplotlib.cm.get_cmap(colors)
             if colors_operand is None:
                 # Get distances from (0, 0) (albeit potentially clipped)
-                origin_center = self.get_canvas_coords(np.zeros((1, 2)))[0][0]
+                origin_center = self.get_canvas_coords(np.zeros((1, 2)))[0][0] # canvas中中点的坐标
                 colors_operand = np.sqrt(
                     ((canvas_xy - origin_center) ** 2).sum(axis=1))
                     
@@ -416,8 +416,8 @@ class Canvas_BEV_heading_right(object):
                 "colors type {} was not an expected type".format(type(colors)))
 
         # Here the order is different from Canvas_BEV
-        if radius == -1:
-            self.canvas[canvas_xy[:, 1], canvas_xy[:, 0], :] = colors
+        if radius == -1: # 每一个点以一个单独的点展示，否则就是用对应半径的圆展示
+            self.canvas[canvas_xy[:, 1], canvas_xy[:, 0], :] = colors # （800，2800， 3）所有点的位置改成对应的颜色
         else:
             for color, (x, y) in zip(colors.tolist(), canvas_xy.tolist()):
                 self.canvas = cv2.circle(self.canvas, (x, y), radius, color, 
@@ -480,9 +480,9 @@ class Canvas_BEV_heading_right(object):
 
         # At least 1 corner in canvas to draw.
         valid_mask = valid_mask.sum(axis=1) > 0
-        bev_corners_canvas = bev_corners_canvas[valid_mask]
+        bev_corners_canvas = bev_corners_canvas[valid_mask] # 以上是将所有的bbx四角点转到canvas上的坐标
         if texts is not None:
-            texts = np.array(texts)[valid_mask]
+            texts = np.array(texts)[valid_mask] # text也是（N，）每一项是一个字符串
 
         ## Draw onto canvas
         # Draw the outer boundaries
@@ -490,10 +490,10 @@ class Canvas_BEV_heading_right(object):
         for i, (color, curr_box_corners) in enumerate(
                 zip(colors.tolist(), bev_corners_canvas)):
                 
-            curr_box_corners = curr_box_corners.astype(np.int32)
+            curr_box_corners = curr_box_corners.astype(np.int32) # 4， 2
             for start, end in idx_draw_pairs:
                 # Notice Difference Here
-                self.canvas = cv2.line(self.canvas,
+                self.canvas = cv2.line(self.canvas, # （800， 2800， 3）
                                        tuple(curr_box_corners[start]\
                                         .tolist()),
                                        tuple(curr_box_corners[end]\

@@ -33,7 +33,7 @@ def inference_late_fusion(batch_data, model, dataset):
     """
     output_dict = OrderedDict()
 
-    for cav_id, cav_content in batch_data.items():
+    for cav_id, cav_content in batch_data.items(): # 只有一个场景，每一个agent独立处理
         output_dict[cav_id] = model(cav_content)
 
     pred_box_tensor, pred_score, gt_box_tensor = \
@@ -69,9 +69,9 @@ def inference_no_fusion(batch_data, model, dataset, single_gt=False):
     """
     output_dict_ego = OrderedDict()
     if single_gt:
-        batch_data = {'ego': batch_data['ego']}
+        batch_data = {'ego': batch_data['ego']} # single的话就只看ego自己范围内的gt
         
-    output_dict_ego['ego'] = model(batch_data['ego'])
+    output_dict_ego['ego'] = model(batch_data['ego']) # 只输入ego的信息
     # output_dict only contains ego
     # but batch_data havs all cavs, because we need the gt box inside.
 
@@ -107,14 +107,17 @@ def inference_no_fusion_w_uncertainty(batch_data, model, dataset):
     # output_dict only contains ego
     # but batch_data havs all cavs, because we need the gt box inside.
 
-    pred_box_tensor, pred_score, gt_box_tensor, uncertainty_tensor = \
+    pred_box_tensor, pred_score, gt_box_tensor, cls_noise, uncertainty_tensor, unc_epi_cls, unc_epi_reg = \
         dataset.post_process_no_fusion_uncertainty(batch_data, # only for late fusion dataset
                              output_dict_ego)
 
     return_dict = {"pred_box_tensor" : pred_box_tensor, \
                     "pred_score" : pred_score, \
                     "gt_box_tensor" : gt_box_tensor, \
-                    "uncertainty_tensor" : uncertainty_tensor}
+                    "cls_noise" : cls_noise, \
+                    "uncertainty_tensor" : uncertainty_tensor, \
+                    "unc_epi_cls" : unc_epi_cls, \
+                    "unc_epi_reg" : unc_epi_reg}
 
     return return_dict
 

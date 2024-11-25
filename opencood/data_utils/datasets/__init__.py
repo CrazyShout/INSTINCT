@@ -1,4 +1,5 @@
 from opencood.data_utils.datasets.late_fusion_dataset import getLateFusionDataset
+from opencood.data_utils.datasets.late_v2_fusion_dataset import getLatev2FusionDataset
 from opencood.data_utils.datasets.early_fusion_dataset import getEarlyFusionDataset
 from opencood.data_utils.datasets.intermediate_fusion_dataset import getIntermediateFusionDataset
 from opencood.data_utils.datasets.intermediate_2stage_fusion_dataset import getIntermediate2stageFusionDataset
@@ -11,7 +12,7 @@ def build_dataset(dataset_cfg, visualize=False, train=True):
     fusion_name = dataset_cfg['fusion']['core_method']
     dataset_name = dataset_cfg['fusion']['dataset']
 
-    assert fusion_name in ['late', 'intermediate', 'intermediate2stage', 'early']
+    assert fusion_name in ['late', 'latev2', 'intermediate', 'intermediate2stage', 'early']
     assert dataset_name in ['opv2v', 'v2xsim', 'dairv2x', 'v2xset']
 
     fusion_dataset_func = "get" + fusion_name.capitalize() + "FusionDataset"

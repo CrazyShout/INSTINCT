@@ -97,11 +97,15 @@ class BasePostprocessor(object):
         gt_box3d_tensor = gt_box3d_list[gt_box3d_selected_indices]
 
         # filter the gt_box to make sure all bbx are in the range. with z dim
-        gt_box3d_np = gt_box3d_tensor.cpu().numpy()
-        gt_box3d_np = box_utils.mask_boxes_outside_range_numpy(gt_box3d_np,
-                                                    self.params['gt_range'],
-                                                    order=None)
-        gt_box3d_tensor = torch.from_numpy(gt_box3d_np).to(device=gt_box3d_list[0].device)
+        mask = \
+            box_utils.get_mask_for_boxes_within_range_torch(gt_box3d_tensor, self.params['gt_range'])
+        gt_box3d_tensor = gt_box3d_tensor[mask, :, :]
+        # 以下是原始CoAlign的代码，会出现问题：gt_box3d_list[0]无这个元素就会报错
+        # gt_box3d_np = gt_box3d_tensor.cpu().numpy()
+        # gt_box3d_np = box_utils.mask_boxes_outside_range_numpy(gt_box3d_np,
+        #                                             self.params['gt_range'],
+        #                                             order=None)
+        # gt_box3d_tensor = torch.from_numpy(gt_box3d_np).to(device=gt_box3d_list[0].device)
 
         return gt_box3d_tensor
 
@@ -407,7 +411,7 @@ class BasePostprocessor(object):
         box_utils.load_single_objects_dairv2x(tmp_object_list,
                                         output_dict,
                                         filter_range,
-                                        self.params['order'])
+                                        self.params['order']) # 载入GT label 形成 id:（1,7） 的组织形式
 
         object_np = np.zeros((self.params['max_num'], 7))
         mask = np.zeros(self.params['max_num'])

@@ -36,7 +36,7 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
             PointCloud, (N, 4).
 
         pc_range : list
-            [xmin, ymin, zmin, xmax, ymax, zmax]
+            [xmin, ymin, zmin, xmax, ymax, zmax] Dair-v2x是[-100.8, -40, -3, 100.8, 40, 1]
 
         save_path : str
             Save the visualization results to given path.
@@ -47,32 +47,32 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
         method: str, 'bev' or '3d'
 
         """
-        plt.figure(figsize=[(pc_range[3]-pc_range[0])/40, (pc_range[4]-pc_range[1])/40])
-        pc_range = [int(i) for i in pc_range]
-        pcd_np = pcd.cpu().numpy()
+        plt.figure(figsize=[(pc_range[3]-pc_range[0])/40, (pc_range[4]-pc_range[1])/40]) # 201.6/40， 80/40
+        pc_range = [int(i) for i in pc_range] # 转换成整型 （-100， -40， -3， 100， 40, 1）
+        pcd_np = pcd.cpu().numpy() # cpu上，转为numpy
 
-        pred_box_tensor = infer_result.get("pred_box_tensor", None)
-        gt_box_tensor = infer_result.get("gt_box_tensor", None)
+        pred_box_tensor = infer_result.get("pred_box_tensor", None) # N, 8, 3
+        gt_box_tensor = infer_result.get("gt_box_tensor", None) # N, 8, 3
 
         if pred_box_tensor is not None:
-            pred_box_np = pred_box_tensor.cpu().numpy()
-            pred_name = ['pred'] * pred_box_np.shape[0]
+            pred_box_np = pred_box_tensor.cpu().numpy() # N, 8, 3
+            pred_name = ['pred'] * pred_box_np.shape[0] # ['pred', 'pred', 'pred'...] N个 
 
-            score = infer_result.get("score_tensor", None)
+            score = infer_result.get("score_tensor", None) # （N，）
             if score is not None:
                 score_np = score.cpu().numpy()
-                pred_name = [f'score:{score_np[i]:.3f}' for i in range(score_np.shape[0])]
+                pred_name = [f'score:{score_np[i]:.3f}' for i in range(score_np.shape[0])] # ['score: x.xx'...]
 
             uncertainty = infer_result.get("uncertainty_tensor", None)
             if uncertainty is not None:
                 uncertainty_np = uncertainty.cpu().numpy()
-                uncertainty_np = np.exp(uncertainty_np)
+                # uncertainty_np = np.exp(uncertainty_np) 不需要再去求指数了，因为已经在前面做过处理
                 d_a_square = 1.6**2 + 3.9**2
                 
                 if uncertainty_np.shape[1] == 3:
                     uncertainty_np[:,:2] *= d_a_square
                     uncertainty_np = np.sqrt(uncertainty_np) 
-                    # yaw angle is in radian, it's the same in g2o SE2's setting.
+                    # yaw angle is in radian, it's the same in g2o SE2's setting. 特殊欧式群？xyj 2024年05月23日
 
                     pred_name = [f'x_u:{uncertainty_np[i,0]:.3f} y_u:{uncertainty_np[i,1]:.3f} a_u:{uncertainty_np[i,2]:.3f}' \
                                     for i in range(uncertainty_np.shape[0])]
@@ -96,17 +96,24 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
             gt_name = ['gt'] * gt_box_np.shape[0]
 
         if method == 'bev':
+            '''
+            # input:
+                canvas_shape: (800, 2000)
+                canvas_x_range: (-100, 100)
+                canvas_y_range: (-40, 40)
+                left_hand: dair-v2x: True / v2xset:False / opv2v:False
+            '''
             canvas = canvas_bev.Canvas_BEV_heading_right(canvas_shape=((pc_range[4]-pc_range[1])*10, (pc_range[3]-pc_range[0])*10),
                                             canvas_x_range=(pc_range[0], pc_range[3]), 
                                             canvas_y_range=(pc_range[1], pc_range[4]),
                                             left_hand=left_hand) 
-
-            canvas_xy, valid_mask = canvas.get_canvas_coords(pcd_np) # Get Canvas Coords
-            canvas.draw_canvas_points(canvas_xy[valid_mask]) # Only draw valid points
+            # canvas_xy（N, 2）, valid_mask (N, ) 在lidar范围内的才标记的掩码
+            canvas_xy, valid_mask = canvas.get_canvas_coords(pcd_np) # Get Canvas Coords 将点云的x，y单独取出，映射到canvas大小上
+            canvas.draw_canvas_points(canvas_xy[valid_mask]) # Only draw valid points 这是将点云画出来，可以自己选择颜色
             if gt_box_tensor is not None:
-                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=gt_name)
+                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=gt_name) # 画绿色GT bbx
             if pred_box_tensor is not None:
-                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=pred_name)
+                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=pred_name) # 画红色GT bbx
 
             # heterogeneous
             lidar_agent_record = infer_result.get("lidar_agent_record", None)

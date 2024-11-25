@@ -7,6 +7,7 @@ Provide api for multiscale intermeidate fuion
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from opencood.models.sub_modules.resblock import ResNetModified, BasicBlock
 
@@ -17,15 +18,22 @@ class ResNetBEVBackbone(nn.Module):
         super().__init__()
         self.model_cfg = model_cfg
 
+        self.use_dropout = model_cfg.get('use_dropout', False)
+        self.enable_dropout = model_cfg.get('dropout_enable', False)
+        if self.use_dropout:
+            print("===backbone use dropout===")
+            if self.enable_dropout:
+                print("  --enforce enable dropout with F.Dropout2d")
+
         if 'layer_nums' in self.model_cfg:
 
             assert len(self.model_cfg['layer_nums']) == \
                    len(self.model_cfg['layer_strides']) == \
                    len(self.model_cfg['num_filters'])
 
-            layer_nums = self.model_cfg['layer_nums']
-            layer_strides = self.model_cfg['layer_strides']
-            num_filters = self.model_cfg['num_filters']
+            layer_nums = self.model_cfg['layer_nums'] # [3, 4, 5]
+            layer_strides = self.model_cfg['layer_strides'] # [2, 2, 2]
+            num_filters = self.model_cfg['num_filters'] # [128, 256, 512]
         else:
             layer_nums = layer_strides = num_filters = []
 
@@ -33,8 +41,8 @@ class ResNetBEVBackbone(nn.Module):
             assert len(self.model_cfg['upsample_strides']) \
                    == len(self.model_cfg['num_upsample_filter'])
 
-            num_upsample_filters = self.model_cfg['num_upsample_filter']
-            upsample_strides = self.model_cfg['upsample_strides']
+            num_upsample_filters = self.model_cfg['num_upsample_filter'] # [128, 128, 128]
+            upsample_strides = self.model_cfg['upsample_strides'] # [1, 2, 4]
 
         else:
             upsample_strides = num_upsample_filters = []
@@ -95,7 +103,13 @@ class ResNetBEVBackbone(nn.Module):
 
         for i in range(self.num_levels):
             if len(self.deblocks) > 0:
-                ups.append(self.deblocks[i](x[i]))
+                if self.use_dropout:
+                    if self.enable_dropout: # 这个开启的时候则在验证和推理的时候也会开启Dropout
+                        ups.append(F.dropout2d(self.deblocks[i](x[i]), p=0.1, training = True))
+                    else:
+                        ups.append(F.dropout2d(self.deblocks[i](x[i]), p=0.1, training = self.training))
+                else:
+                    ups.append(self.deblocks[i](x[i]))
             else:
                 ups.append(x[i])
 

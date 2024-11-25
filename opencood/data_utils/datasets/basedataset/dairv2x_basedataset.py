@@ -97,7 +97,7 @@ class DAIRV2XBaseDataset(Dataset):
         data = OrderedDict()
 
         data[0] = OrderedDict()
-        data[0]['ego'] = True
+        data[0]['ego'] = True # 车端默认放在前
         data[1] = OrderedDict()
         data[1]['ego'] = False
 

@@ -1,15 +1,15 @@
 name: dairv2x_pointpillar_uncertainty_late_fusion
-data_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure"
-root_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
-validate_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
-test_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
+root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
+validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+test_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
 
 yaml_parser: "load_point_pillar_params"
 train_params:
-  batch_size: &batch_size 4 # need change to 1 when infering
-  epoches: 50
-  eval_freq: 2
-  save_freq: 2
+  batch_size: &batch_size 16 # need change to 1 when infering
+  epoches: 60
+  eval_freq: 1
+  save_freq: 1
 
 
 input_source: ['lidar']
@@ -86,13 +86,45 @@ model:
       num_features: 64
 
     base_bev_backbone:
-      layer_nums: [3, 5, 8]
+      resnet: true
+      use_dropout: True
+      dropout_enable: False # 这个会使得单车在train以及test的时候dropout都开启
+      layer_nums: [3, 4, 5]
       layer_strides: [2, 2, 2]
-      num_filters: [64, 128, 256]
+      num_filters: [128, 256, 512]
       upsample_strides: [1, 2, 4]
       num_upsample_filter: [128, 128, 128]
+      compression: 0
+      voxel_size: *voxel_size
+
+    shrink_header: # 单车训练中原本没有这个
+      use_atten: true
+      kernal_size: [ 3 ]
+      stride: [ 1 ]
+      padding: [ 1 ]
+      dim: [ 256 ]
+      input_dim: 384 # 128 * 3
 
     uncertainty_dim: &uncertainty_dim 3
+    re_parameterization: true # 控制是否使用重参数化来衡量分类的数据不确定性
+    mc_dropout:
+      dropout_rate: 0.1
+      inference_stage: false
+      inference_num: 10
+
+      tp_score_mean: 0.6469 # 0.6251
+      tp_score_std: 0.1571 # 0.1549
+      tp_data_ucls_mean: 0.0617 # 0.1047
+      tp_data_ucls_std: 0.0140 # 0.0225
+      tp_model_ucls_mean: 0.8582 # 0.8793
+      tp_model_ucls_std: 0.1207 # 0.1095
+      data_ureg_mean: 2.1335 # 6.3410
+      data_ureg_std: 0.6666 # 1.9687
+      model_ureg_mean: 0.0489 # 0.0441
+      model_ureg_std: 0.0222 # 0.0207
+
+      dairv2x: true
+      unc_normalize: true
 
 loss:
   core_method: point_pillar_uncertainty_loss

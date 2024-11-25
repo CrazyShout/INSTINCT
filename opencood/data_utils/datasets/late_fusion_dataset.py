@@ -82,7 +82,7 @@ def getLateFusionDataset(cls):
             lidar_pose_list = []
 
             # first find the ego vehicle's lidar pose
-            for cav_id, cav_content in base_data_dict.items():
+            for cav_id, cav_content in base_data_dict.items(): # 对于dair： 0：{} 1:{}
                 if cav_content['ego']:
                     ego_id = cav_id
                     ego_lidar_pose = cav_content['params']['lidar_pose']
@@ -106,7 +106,7 @@ def getLateFusionDataset(cls):
                 lidar_pose_list.append(selected_cav_base['params']['lidar_pose'])
 
             cav_id_list_newname = []
-            for cav_id in cav_id_list:
+            for cav_id in cav_id_list: # 对于dair，最多就是2 分别为0或者1
                 selected_cav_base = base_data_dict[cav_id]
                 # find the transformation matrix from current cav to ego.
                 cav_lidar_pose = selected_cav_base['params']['lidar_pose']
@@ -126,7 +126,24 @@ def getLateFusionDataset(cls):
             processed_data_dict['ego']['cav_list'] = cav_id_list_newname
 
             return processed_data_dict
-
+            '''
+            dair-v2x:
+            processed_data_dict{
+                'ego':{
+                    selected_cav_processed:{
+                    'processed_lidar':体素信息
+                    'object_bbx_center':
+                    'object_bbx_mask':
+                    'object_ids':
+                    'label_dict': 注意, 这里是single label
+                    },
+                    'idx':idx样本id
+                    'cav_list': ['ego', 1]
+                }
+                1:{selected_cav_processed,
+                }
+            }
+            '''
 
         def get_item_single_car(self, selected_cav_base):
             """
@@ -149,7 +166,7 @@ def getLateFusionDataset(cls):
             # label
             object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center_single(
                 [selected_cav_base], selected_cav_base["params"]["lidar_pose_clean"]
-            )
+            ) # single label 单车标签
 
             # lidar
             if self.load_lidar_file or self.visualize:
@@ -274,7 +291,15 @@ def getLateFusionDataset(cls):
             selected_cav_processed.update({"label_dict": label_dict})
 
             return selected_cav_processed
-
+            '''
+            selected_cav_processed:{
+                'processed_lidar':体素信息
+                'object_bbx_center':
+                'object_bbx_mask':
+                'object_ids':
+                'label_dict': 注意, 这里是single label
+            }
+            '''
 
         def collate_batch_train(self, batch):
             """
@@ -396,7 +421,7 @@ def getLateFusionDataset(cls):
                 projected_lidar_list = []
                 origin_lidar = []
 
-            for cav_id, cav_content in batch.items():
+            for cav_id, cav_content in batch.items(): # keys are {'ego', 1}
                 output_dict.update({cav_id: {}})
                 # shape: (1, max_num, 7)
                 object_bbx_center = \
@@ -426,7 +451,7 @@ def getLateFusionDataset(cls):
                     # processed lidar dictionary
                     processed_lidar_torch_dict = \
                         self.pre_processor.collate_batch(
-                            [cav_content['processed_lidar']])
+                            [cav_content['processed_lidar']]) # 体素先合到一起
                     output_dict[cav_id].update({'processed_lidar': processed_lidar_torch_dict})
 
                 if self.load_camera_file:
@@ -454,7 +479,7 @@ def getLateFusionDataset(cls):
 
                 # label dictionary
                 label_torch_dict = \
-                    self.post_processor.collate_batch([cav_content['label_dict']])
+                    self.post_processor.collate_batch([cav_content['label_dict']]) # 这里是single标签
                     
                 # for centerpoint
                 label_torch_dict.update({'object_bbx_center': object_bbx_center,
@@ -534,8 +559,8 @@ def getLateFusionDataset(cls):
             data_dict_ego['ego'] = data_dict['ego']
             gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
-            pred_box_tensor, pred_score, uncertainty = \
+            pred_box_tensor, pred_score, cls_noise, uncertainty, unc_epi_cls, unc_epi_reg = \
                 self.post_processor.post_process(data_dict_ego, output_dict_ego, return_uncertainty=True)
-            return pred_box_tensor, pred_score, gt_box_tensor, uncertainty
+            return pred_box_tensor, pred_score, gt_box_tensor, cls_noise, uncertainty, unc_epi_cls, unc_epi_reg
 
     return LateFusionDataset

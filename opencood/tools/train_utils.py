@@ -84,6 +84,7 @@ def setup_train(hypes):
         Config yaml dictionary for training:
     """
     model_name = hypes['name']
+    dataset = hypes.get('dataset', 'dairv2x')
     current_time = datetime.now()
 
     folder_name = current_time.strftime("_%Y_%m_%d_%H_%M_%S")
@@ -91,8 +92,10 @@ def setup_train(hypes):
 
     current_path = os.path.dirname(__file__)
     current_path = os.path.join(current_path, '../logs')
+    current_path = os.path.join(current_path, dataset)
 
     full_path = os.path.join(current_path, folder_name)
+    full_path = os.path.abspath(full_path)
 
     if not os.path.exists(full_path):
         if not os.path.exists(full_path):

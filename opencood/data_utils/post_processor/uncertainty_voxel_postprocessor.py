@@ -122,8 +122,11 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
         pred_box3d_list = []
         pred_box2d_list = []
         uncertainty_list = []
+        unc_epi_cls_list = []
+        unc_epi_reg_list = []
+        cls_noise_list = []
         for cav_id, cav_content in data_dict.items():
-            if cav_id not in output_dict:
+            if cav_id not in output_dict: # cav_id 是 'ego'
                 continue
             # the transformation matrix to ego space
             transformation_matrix = cav_content['transformation_matrix'] # no clean
@@ -132,34 +135,43 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
             anchor_box = cav_content['anchor_box']
 
             # classification probability
-            uncertainty_dim = output_dict[cav_id]['unc_preds'].shape[1] // output_dict[cav_id]['cls_preds'].shape[1]
+            uncertainty_dim = output_dict[cav_id]['unc_preds'].shape[1] // output_dict[cav_id]['cls_preds'].shape[1] # 3
             prob = output_dict[cav_id]['cls_preds']
-            prob = F.sigmoid(prob.permute(0, 2, 3, 1))
-            prob = prob.reshape(1, -1)
+            prob = F.sigmoid(prob.permute(0, 2, 3, 1)) # （N，H，W，2）
+            prob = prob.reshape(1, -1) # （1，2NHW）
 
             # regression map
-            reg = output_dict[cav_id]['reg_preds']
+            reg = output_dict[cav_id]['reg_preds'] # （N，14，H，W）
 
             # uncertainty map
-            unc_preds = output_dict[cav_id]['unc_preds'].permute(0, 2, 3, 1).contiguous()
-            unc_preds = unc_preds.view(unc_preds.shape[0], -1, uncertainty_dim) # [N, H*W*#anchor_num, 2]
+            unc_preds = output_dict[cav_id]['unc_preds'].permute(0, 2, 3, 1).contiguous() # （N，H，W，6）
+            unc_preds = unc_preds.view(unc_preds.shape[0], -1, uncertainty_dim) # [N, H*W*#anchor_num, 2] （N，H*W*2，3）
+            unc_epi_cls = output_dict[cav_id]['unc_epi_cls'].permute(0, 2, 3, 1).contiguous() # （N，H，W，2）
+            unc_epi_cls = unc_epi_cls.view(unc_epi_cls.shape[0], -1, 1) # （N，H*W*2，1）
+            unc_epi_reg = output_dict[cav_id]['unc_epi_reg'].permute(0, 2, 3, 1).contiguous() # （N，H，W，2）
+            unc_epi_reg = unc_epi_reg.view(unc_epi_reg.shape[0], -1, 1) # （N，H*W*2，1）
+
+            cls_noise = output_dict[cav_id]['cls_noise'].permute(0, 2, 3, 1).contiguous() # （N，H，W，2）
+            cls_noise = cls_noise.view(cls_noise.shape[0], -1, 1) # （N，H*W*2，1）
 
             # convert regression map back to bounding box
             batch_box3d = self.delta_to_boxes3d(reg, anchor_box) # (N, H*W*#anchor_num, 7)
             mask = \
-                torch.gt(prob, self.params['target_args']['score_threshold'])
+                torch.gt(prob, self.params['target_args']['score_threshold']) # （1，2NHW）
             mask = mask.view(1, -1)
-            mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
-            mask_sm = mask.unsqueeze(2).repeat(1, 1, uncertainty_dim)
-            
+            mask_reg = mask.unsqueeze(2).repeat(1, 1, 7) # （1，2HW，7）没有N是因为test时N始终是1
+            mask_sm = mask.unsqueeze(2).repeat(1, 1, uncertainty_dim) # （1，2HW，3）
+            mask_epi = mask.unsqueeze(2) # （1，2HW，1）
+
             # during validation/testing, the batch size should be 1
             assert batch_box3d.shape[0] == 1
             boxes3d = torch.masked_select(batch_box3d[0],
-                                          mask_reg[0]).view(-1, 7)
-            scores = torch.masked_select(prob[0], mask[0])
-            uncertainty = torch.masked_select(unc_preds[0], mask_sm[0]).view(-1, uncertainty_dim)
-
-
+                                          mask_reg[0]).view(-1, 7) # mask出置信度符合threshold的box，假设有M个，则为（M，7）
+            scores = torch.masked_select(prob[0], mask[0]) # （M）
+            uncertainty = torch.masked_select(unc_preds[0], mask_sm[0]).view(-1, uncertainty_dim) # （M，3）
+            unc_epi_cls = torch.masked_select(unc_epi_cls[0], mask_epi[0]).view(-1, 1) # （M，1）
+            unc_epi_reg = torch.masked_select(unc_epi_reg[0], mask_epi[0]).view(-1, 1) # （M，1）
+            cls_noise = torch.masked_select(cls_noise[0], mask_epi[0]).view(-1, 1) # （M，1）
             # adding dir classifier
             if 'dir_preds' in output_dict[cav_id].keys() and len(boxes3d) != 0:
                 dir_offset = self.params['dir_args']['dir_offset']
@@ -200,16 +212,26 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
                 pred_box2d_list.append(boxes2d_score)
                 pred_box3d_list.append(projected_boxes3d)
                 uncertainty_list.append(uncertainty)
+                unc_epi_cls_list.append(unc_epi_cls)
+                unc_epi_reg_list.append(unc_epi_reg)    
+                cls_noise_list.append(cls_noise)            
 
 
         if len(pred_box2d_list) ==0 or len(pred_box3d_list) == 0:
             if return_uncertainty:
-                return None, None, None
+                return None, None, None, None, None, None
             return None, None
         # shape: (N, 5)
         pred_box2d_list = torch.vstack(pred_box2d_list)
         uncertainty_list = torch.vstack(uncertainty_list)
         uncertainty = uncertainty_list
+        unc_epi_cls_list = torch.vstack(unc_epi_cls_list)
+        unc_epi_cls = unc_epi_cls_list
+        unc_epi_reg_list = torch.vstack(unc_epi_reg_list)
+        unc_epi_reg = unc_epi_reg_list
+        cls_noise_list = torch.vstack(cls_noise_list)
+        cls_noise = cls_noise_list
+
         # scores
         scores = pred_box2d_list[:, -1]
         # predicted 3d bbx
@@ -222,11 +244,14 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
         pred_box3d_tensor = pred_box3d_tensor[keep_index]
         scores = scores[keep_index]
         uncertainty = uncertainty[keep_index]
+        unc_epi_cls = unc_epi_cls[keep_index]
+        unc_epi_reg = unc_epi_reg[keep_index]
+        cls_noise = cls_noise[keep_index]
 
         # nms
         keep_index = box_utils.nms_rotated(pred_box3d_tensor,
                                            scores,
-                                           self.params['nms_thresh']
+                                           self.params['nms_thresh'] # 0.15, 会将score从大到小排，然后最大的和其他所有box做iou，超过这个0.15的就会被抑制
                                            )
 
         pred_box3d_tensor = pred_box3d_tensor[keep_index]
@@ -234,6 +259,9 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
         # select cooresponding score
         scores = scores[keep_index]
         uncertainty = uncertainty[keep_index]
+        unc_epi_cls = unc_epi_cls[keep_index]
+        unc_epi_reg = unc_epi_reg[keep_index]
+        cls_noise = cls_noise[keep_index]
 
         # filter out the prediction out of the range.
         mask = \
@@ -241,11 +269,17 @@ class UncertaintyVoxelPostprocessor(VoxelPostprocessor):
         pred_box3d_tensor = pred_box3d_tensor[mask, :, :]
         scores = scores[mask]
         uncertainty = uncertainty[mask]
+        unc_epi_cls = unc_epi_cls[mask]
+        unc_epi_reg = unc_epi_reg[mask]
+        cls_noise = cls_noise[mask]
+
+        # print("单车检测到的分类不确定性得分: ", cls_noise[:,0])
+        # print("单车检测到的回归不确定性得分: ", uncertainty[:, 0])
 
         assert scores.shape[0] == pred_box3d_tensor.shape[0]
         
         if return_uncertainty:
-            return pred_box3d_tensor, scores, uncertainty
+            return pred_box3d_tensor, scores, cls_noise, uncertainty, unc_epi_cls, unc_epi_reg
 
         return pred_box3d_tensor, scores
 

@@ -1,8 +1,9 @@
 from functools import partial
 
-import spconv
+# import spconv
 import torch.nn as nn
-
+from opencood.pcdet_utils.spconv_utils import replace_feature, spconv
+from spconv.pytorch import ConvAlgo
 
 def post_act_block(in_channels, out_channels, kernel_size, indice_key=None, stride=1, padding=0,
                    conv_type='subm', norm_fn=None):
@@ -32,7 +33,7 @@ class VoxelBackBone8x(nn.Module):
         self.model_cfg = model_cfg
         norm_fn = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
 
-        self.sparse_shape = grid_size[::-1] + [1, 0, 0]
+        self.sparse_shape = grid_size[::-1] + [1, 0, 0] # D，H，W
 
         self.conv_input = spconv.SparseSequential(
             spconv.SubMConv3d(input_channels, 16, 3, padding=1, bias=False, indice_key='subm1'),

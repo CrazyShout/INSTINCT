@@ -726,7 +726,7 @@ def nms_rotated(boxes, scores, threshold):
         i = ixs[0]
         pick.append(i)
         # Compute IoU of the picked box with the rest
-        iou = common_utils.compute_iou(polygons[i], polygons[ixs[1:]])
+        iou = common_utils.compute_iou(polygons[i], polygons[ixs[1:]]) # 当前这个score最大的和其他所有的做一个iou 返回的是一个np.array
         # Identify boxes with IoU over the threshold. This
         # returns indices into ixs[1:], so add 1 to get
         # indices into ixs.

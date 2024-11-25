@@ -135,11 +135,11 @@ class ResNetModified(nn.Module):
         layers: List[int],  # number of block in one layer
         layer_strides: List[int],  #  stride after one layer
         num_filters: List[int],  # feature dim
-        zero_init_residual: bool = False,
+        zero_init_residual: bool = False, # 决定是否将残差块中的最后一个批归一化层（BatchNorm）初始化为0。这是为了改善模型的收敛性，基于论文中的建议进行的实践。
         groups: int = 1,
         width_per_group: int = 64,
-        replace_stride_with_dilation: Optional[List[bool]] = None,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        replace_stride_with_dilation: Optional[List[bool]] = None, # 指定是否在某些残差层使用空洞卷积代替步长卷积。这是一种调整网络感受野的技术，常用于语义分割等任务。
+        norm_layer: Optional[Callable[..., nn.Module]] = None, # 指定标准化方式
         inplanes = 64
     ) -> None:
         super(ResNetModified, self).__init__()
@@ -159,7 +159,7 @@ class ResNetModified(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
 
-        self.layernum = len(num_filters)
+        self.layernum = len(num_filters) # 3
         for i in range(self.layernum):
             self.__setattr__(f"layer{i}", self._make_layer(block, num_filters[i], layers[i], stride=layer_strides[i]))
 
@@ -206,7 +206,7 @@ class ResNetModified(nn.Module):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
                                 norm_layer=norm_layer))
-
+        # layers.append(nn.Dropout2d(0.1)) # 用来做MC Dropout时可能用到
         return nn.Sequential(*layers)
 
     def _forward_impl(self, x: Tensor, return_interm: bool = True):

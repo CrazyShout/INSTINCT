@@ -171,9 +171,14 @@ def load_second_params(param):
     anchor_args['vh'] = vh
     anchor_args['vd'] = vd
 
-    anchor_args['W'] = int((cav_lidar_range[3] - cav_lidar_range[0]) / vw)
-    anchor_args['H'] = int((cav_lidar_range[4] - cav_lidar_range[1]) / vh)
-    anchor_args['D'] = int((cav_lidar_range[5] - cav_lidar_range[2]) / vd)
+    # int会向下取整，导致和上面grid size结果差1，无意中发现的比如 201.6/0.1 == 2015.9999 然后就被向下取整丢了，虽然不知道会有什么坏影响，先改了 --xuyunjiang
+    anchor_args['W'] = int(np.round((cav_lidar_range[3] - cav_lidar_range[0]) / vw))
+    anchor_args['H'] = int(np.round((cav_lidar_range[4] - cav_lidar_range[1]) / vh))
+    anchor_args['D'] = int(np.round((cav_lidar_range[5] - cav_lidar_range[2]) / vd))
+
+    # anchor_args['W'] = int((cav_lidar_range[3] - cav_lidar_range[0]) / vw)
+    # anchor_args['H'] = int((cav_lidar_range[4] - cav_lidar_range[1]) / vh)
+    # anchor_args['D'] = int((cav_lidar_range[5] - cav_lidar_range[2]) / vd)
 
     param['postprocess'].update({'anchor_args': anchor_args})
 

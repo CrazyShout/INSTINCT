@@ -11,7 +11,7 @@ from opencood.models.sub_modules.pillar_vfe import PillarVFE
 from opencood.models.sub_modules.point_pillar_scatter import PointPillarScatter
 from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbone
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
-from opencood.models.sub_modules.downsample_conv import DownsampleConv
+from opencood.models.sub_modules.downsample_conv import DownsampleConv, AttentionDownsampleConv
 
 
 class PointPillar(nn.Module):
@@ -26,15 +26,21 @@ class PointPillar(nn.Module):
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])
         is_resnet = args['base_bev_backbone'].get("resnet", False)
         if is_resnet:
+            print("===use resbackbone===")
             self.backbone = ResNetBEVBackbone(args['base_bev_backbone'], 64) # or you can use ResNetBEVBackbone, which is stronger
         else:
+            print("===use basebackbone===")
             self.backbone = BaseBEVBackbone(args['base_bev_backbone'], 64) # or you can use ResNetBEVBackbone, which is stronger
         self.out_channel = sum(args['base_bev_backbone']['num_upsample_filter'])
 
         self.shrink_flag = False
         if 'shrink_header' in args:
+            print("===use downsample conv to reduce memory===")
             self.shrink_flag = True
-            self.shrink_conv = DownsampleConv(args['shrink_header'])
+            if args['shrink_header']['use_atten']:
+                self.shrink_conv = AttentionDownsampleConv(args['shrink_header'])
+            else:
+                self.shrink_conv = DownsampleConv(args['shrink_header'])
             self.out_channel = args['shrink_header']['dim'][-1]
 
         self.cls_head = nn.Conv2d(self.out_channel, args['anchor_number'], # 384

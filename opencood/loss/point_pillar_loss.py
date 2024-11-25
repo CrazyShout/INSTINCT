@@ -232,7 +232,7 @@ def sigmoid_focal_loss(preds, targets, weights=None, **kwargs):
     # sigmoid cross entropy with logits
     # more details: https://www.tensorflow.org/api_docs/python/tf/nn/sigmoid_cross_entropy_with_logits
     per_entry_cross_ent = torch.clamp(preds, min=0) - preds * targets.type_as(preds)
-    per_entry_cross_ent += torch.log1p(torch.exp(-torch.abs(preds)))
+    per_entry_cross_ent += torch.log1p(torch.exp(-torch.abs(preds))) # 为了数值稳定，将交叉熵公式中的logpt 改写成交叉熵形式
     # focal loss
     prediction_probabilities = torch.sigmoid(preds)
     p_t = (targets * prediction_probabilities) + ((1 - targets) * (1 - prediction_probabilities))
@@ -241,5 +241,5 @@ def sigmoid_focal_loss(preds, targets, weights=None, **kwargs):
 
     loss = modulating_factor * alpha_weight_factor * per_entry_cross_ent
     if weights is not None:
-        loss *= weights
+        loss *= weights # 权重是正样本的个数分之1，则当正样本个数越少，损失越大，会放大损失
     return loss

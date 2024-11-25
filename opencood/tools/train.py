@@ -87,6 +87,8 @@ def main():
         saved_path = train_utils.setup_train(hypes)
         scheduler = train_utils.setup_lr_schedular(hypes, optimizer)
 
+    print(f"===create log path: {saved_path}===")
+
     # we assume gpu is necessary
     if torch.cuda.is_available():
         model.to(device)
@@ -96,6 +98,7 @@ def main():
 
     print('Training start')
     epoches = hypes['train_params']['epoches']
+    print(f"===total epoches is {epoches}===")
     supervise_single_flag = False if not hasattr(opencood_train_dataset, "supervise_single") else opencood_train_dataset.supervise_single
     # used to help schedule learning rate
 
@@ -103,7 +106,7 @@ def main():
         for param_group in optimizer.param_groups:
             print('learning rate %f' % param_group["lr"])
         for i, batch_data in enumerate(train_loader):
-            if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0:
+            if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0: # 没有gt
                 continue
             # the model will be evaluation mode during validation
             model.train()

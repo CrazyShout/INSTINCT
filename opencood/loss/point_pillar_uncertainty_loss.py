@@ -36,10 +36,10 @@ class PointPillarUncertaintyLoss(PointPillarLoss):
             batch_size = target_dict['pos_equal_one'].shape[0]
 
         cls_labls = target_dict['pos_equal_one'].view(batch_size, -1,  1)
-        positives = cls_labls > 0
+        positives = cls_labls > 0 # （B，2HW，1）
         negatives = target_dict['neg_equal_one'].view(batch_size, -1,  1) > 0
 
-        pos_normalizer = positives.sum(1, keepdim=True).float()
+        pos_normalizer = positives.sum(1, keepdim=True).float() # 多少个gt （B，1，1）
 
         # rename variable
         if f'psm{suffix}' in output_dict:
@@ -56,7 +56,7 @@ class PointPillarUncertaintyLoss(PointPillarLoss):
         # cls loss
         cls_preds = output_dict[f'cls_preds{suffix}'].permute(0, 2, 3, 1).contiguous() \
                     .view(batch_size, -1,  1)
-        cls_weights = positives * self.pos_cls_weight + negatives * 1.0
+        cls_weights = positives * self.pos_cls_weight + negatives * 1.0 # （B，2HW，1）
         cls_weights /= torch.clamp(pos_normalizer, min=1.0)
         cls_loss = sigmoid_focal_loss(cls_preds, cls_labls, weights=cls_weights, **self.cls)
         cls_loss = cls_loss.sum() * self.cls['weight'] / batch_size
@@ -262,16 +262,31 @@ class KLLoss(nn.Module):
     def forward(self, input: torch.Tensor,
                       target: torch.Tensor, 
                       sm: torch.Tensor, 
-                      weights: torch.Tensor = None):
+                      weights: torch.Tensor = None,
+                      cls_input: torch.Tensor = None,
+                      cls_target: torch.Tensor = None):
         target = torch.where(torch.isnan(target), input, target)  # ignore nan targets
         
         if self.uncertainty_dim == 3: # x,y,yaw
             xy_diff = input[...,:2] - target[...,:2]
             loss1 = self.xy_loss(xy_diff, sm[...,:2])
+            if torch.isnan(loss1).any():
+                print("===oops: x or y uncertainty loss is NaN!===")
             theta_diff = input[...,7:8] - target[...,7:8]
             loss2 = self.angle_weight * self.angle_loss(theta_diff, sm[...,2:3])
+            if torch.isnan(loss2).any():
+                print("===oops: angle uncertainty loss is NaN!===")
             loss = torch.cat((loss1, loss2), dim=-1)
-            
+        elif self.uncertainty_dim == 4: # x,y,yaw,cls
+            xy_diff = input[...,:2] - target[...,:2]
+            loss1 = self.xy_loss(xy_diff, sm[...,:2])
+            theta_diff = input[...,7:8] - target[...,7:8]
+            loss2 = self.angle_weight * self.angle_loss(theta_diff, sm[...,2:3])
+            pred_sigmoid = torch.sigmoid(cls_input) # (B,2HW,1)
+            cls_diff = pred_sigmoid - cls_target
+            loss3 = self.kl_loss_l2(cls_diff, sm[...,3:4])
+            loss = torch.cat((loss1, loss2, loss3), dim=-1)
+            raise ValueError("This scheme just for a funny try, dont't use! --from xyj at 2024/5/23")
         elif self.uncertainty_dim == 7: # all regression target
             other_diff = input[...,:6] - target[...,:6]
             theta_diff = input[...,7:8] - target[...,7:8]

@@ -13,6 +13,8 @@ from shapely.geometry import Polygon
 import json
 import pickle
 from collections import OrderedDict
+import logging
+
 
 def merge_features_to_dict(processed_feature_list, merge=None):
     """
@@ -294,3 +296,19 @@ def generate_voxel2pinds(sparse_tensor):
     output_shape = [batch_size] + list(spatial_shape) # 计算输出形状 (8, 21, 800, 704)
     v2pinds_tensor = scatter_point_inds(indices, point_indices, output_shape)
     return v2pinds_tensor
+
+def create_logger(log_file=None, rank=0, log_level=logging.INFO):
+    logger = logging.getLogger(__name__)
+    logger.setLevel(log_level if rank == 0 else 'ERROR')
+    formatter = logging.Formatter('%(asctime)s  %(levelname)5s  %(message)s')
+    console = logging.StreamHandler()
+    console.setLevel(log_level if rank == 0 else 'ERROR')
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+    if log_file is not None:
+        file_handler = logging.FileHandler(filename=log_file)
+        file_handler.setLevel(log_level if rank == 0 else 'ERROR')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    logger.propagate = False
+    return logger
