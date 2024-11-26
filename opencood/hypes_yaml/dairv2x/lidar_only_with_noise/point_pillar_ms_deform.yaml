@@ -110,7 +110,7 @@ model:
       dropout: 0.1
       activation: relu
       n_head: 8
-      num_encoder_layers: 6
+      num_encoder_layers: 1
       enc_n_points: 4
       compression: 0
       # fusion: max

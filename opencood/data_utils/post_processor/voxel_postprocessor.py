@@ -276,13 +276,12 @@ class VoxelPostprocessor(BasePostprocessor):
             assert cav_id in output_dict
             # the transformation matrix to ego space
             transformation_matrix = cav_content['transformation_matrix'] # no clean
-
             # rename variable 
             if 'psm' in output_dict[cav_id]:
                 output_dict[cav_id]['cls_preds'] = output_dict[cav_id]['psm']
-            if 'rm' in output_dict:
+            if 'rm' in output_dict[cav_id]:
                 output_dict[cav_id]['reg_preds'] = output_dict[cav_id]['rm']
-            if 'dm' in output_dict:
+            if 'dm' in output_dict[cav_id]:
                 output_dict[cav_id]['dir_preds'] = output_dict[cav_id]['dm']
 
             # (H, W, anchor_num, 7)
