@@ -170,11 +170,11 @@ class DeformableTransformerBackbone(nn.Module):
     def get_valid_ratio(self, x):
         N, _, H, W = x.shape
         mask = torch.zeros((N,H,W),dtype=torch.bool,device=x.device)
-        valid_H = torch.sum(~mask[:, :, 0], 1)
+        valid_H = torch.sum(~mask[:, :, 0], 1) # (N, ) 每个结果都是H
         valid_W = torch.sum(~mask[:, 0, :], 1)
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
-        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1) # （N, 2） 两个都是1
         return valid_ratio
 
 

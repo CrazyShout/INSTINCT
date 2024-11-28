@@ -1144,7 +1144,6 @@ def load_single_objects_dairv2x(object_list,
         h = object_content['3d_dimensions']['h']
         w = object_content['3d_dimensions']['w']
         rotation = object_content['rotation']
-
         if isinstance(x, str): # in camera label, xyz are str
             x = eval(x)
             y = eval(y)

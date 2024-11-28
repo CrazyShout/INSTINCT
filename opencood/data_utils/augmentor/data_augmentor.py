@@ -10,6 +10,7 @@ from functools import partial
 import numpy as np
 
 from opencood.data_utils.augmentor import augment_utils
+from opencood.data_utils.augmentor import database_sampler
 
 
 class DataAugmentor(object):
@@ -27,13 +28,24 @@ class DataAugmentor(object):
         The list of data augmented functions.
     """
 
-    def __init__(self, augment_config, train=True):
+    def __init__(self, augment_config, train=True, data_dir=None, class_names=None):
         self.data_augmentor_queue = []
         self.train = train
+        self.data_dir = data_dir
+        self.class_names = class_names
 
         for cur_cfg in augment_config:
             cur_augmentor = getattr(self, cur_cfg['NAME'])(config=cur_cfg)
             self.data_augmentor_queue.append(cur_augmentor)
+            print(cur_cfg['NAME'])
+
+    def gt_sampling(self, config=None):
+        db_sampler = database_sampler.DataBaseSampler(
+            root_path=self.data_dir,
+            sampler_cfg=config,
+            class_names=self.class_names
+        )
+        return db_sampler
 
     def random_world_flip(self, data_dict=None, config=None):
         if data_dict is None:

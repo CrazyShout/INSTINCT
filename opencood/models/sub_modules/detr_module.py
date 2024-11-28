@@ -113,6 +113,15 @@ class DeformableTransformerEncoder(nn.Module):
         return reference_points
 
     def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+        """ 
+        src: (bs, l_all, c) 所有的特征图flatten后的结果
+        spatial_shapes: (3, 2) 每个特征图的shape 3 表示有3个feature map
+        level_start_index: # [0, l1_num, l1+l2 num]
+        valid_ratios: feature 保存的比例
+        pos: 
+        padding_mask: mask dn 互相mask
+        """
+        
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):

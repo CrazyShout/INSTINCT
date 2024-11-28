@@ -18,6 +18,45 @@ from opencood.utils.transformation_utils import veh_side_rot_and_trans_to_trasnf
 from opencood.utils.transformation_utils import inf_side_rot_and_trans_to_trasnformation_matrix
 from opencood.data_utils.pre_processor import build_preprocessor
 from opencood.data_utils.post_processor import build_postprocessor
+from opencood.utils.transformation_utils import x1_to_x2, x_to_world
+from opencood.utils.box_utils import corner_to_center
+from opencood.pcdet_utils.roiaware_pool3d import roiaware_pool3d_utils
+
+def project_world_objects_dairv2x(object_list, lidar_pose, order='lwh'):
+    """
+    Project the objects under world coordinates into another coordinate
+    based on the provided extrinsic.
+
+    Parameters
+    ----------
+    object_list : list
+        The list contains all objects surrounding a certain cav.
+
+    output_dict : dict
+        key: object id, value: object bbx (xyzlwhyaw).
+
+    lidar_pose : list
+        (6, ), lidar pose under world coordinate, [x, y, z, roll, yaw, pitch].
+
+    order : str
+        'lwh' or 'hwl'
+    """
+    boxes_lidar = []
+    corners_lidar_list = []
+    for object_content in object_list: 
+        lidar_to_world = x_to_world(lidar_pose) # T_world_lidar  # 输入的是ego pose的话，这个就是计算ego到world坐标的转变矩阵 M，有M*X_e = X_world
+        world_to_lidar = np.linalg.inv(lidar_to_world) # 后续的坐标都是世界坐标点，所以只要求逆就能得到将其转变到ego的变换矩阵
+
+        corners_world = np.array(object_content['world_8_points']) # [8,3]
+        corners_world_homo = np.pad(corners_world, ((0,0), (0,1)), constant_values=1) # [8, 4]
+        corners_lidar = (world_to_lidar @ corners_world_homo.T).T  # （8, 4）
+        corners_lidar_list.append(corners_lidar)
+
+        bbx_lidar = corners_lidar
+        bbx_lidar = np.expand_dims(bbx_lidar[:, :3], 0) # [1, 8, 3]
+        bbx_lidar = corner_to_center(bbx_lidar, order=order) # （1， 7）
+        boxes_lidar.append(bbx_lidar[0])
+    return boxes_lidar, corners_lidar_list
 
 class DAIRV2XBaseDataset(Dataset):
     def __init__(self, params, visualize, train=True):
@@ -28,8 +67,7 @@ class DAIRV2XBaseDataset(Dataset):
         self.pre_processor = build_preprocessor(params["preprocess"], train)
         self.post_processor = build_postprocessor(params["postprocess"], train)
         self.post_processor.generate_gt_bbx = self.post_processor.generate_gt_bbx_by_iou
-        self.data_augmentor = DataAugmentor(params['data_augment'],
-                                            train)
+        self.data_augmentor = DataAugmentor(params['data_augment'], train, params['data_dir'], params['class_names'])
 
         if 'clip_pc' in params['fusion']['args'] and params['fusion']['args']['clip_pc']:
             self.clip_pc = True
@@ -229,3 +267,181 @@ class DAIRV2XBaseDataset(Dataset):
         object_bbx_mask = tmp_dict['object_bbx_mask']
 
         return lidar_np, object_bbx_center, object_bbx_mask
+    
+        # lixiang 2023.3 add create gt sampling database
+    def create_groundtruth_database(self, used_classes=None, split='train', sensor='vehicle'):
+        import torch
+        from pathlib import Path
+        import pickle
+        import tqdm
+        from opencood.utils.transformation_utils import x1_to_x2
+        from opencood.utils import box_utils
+
+        database_save_path = Path(self.root_dir) / ('gt_database_%s' % sensor) # my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/gt_database_xxx
+        db_info_save_path = Path(self.root_dir) / ('dairv2x_dbinfos_%s.pkl' % sensor)
+
+        database_save_path.mkdir(parents=True, exist_ok=True)
+        all_db_infos = {}
+
+        print('generating {} gt-databse for augmentation'.format(sensor))
+
+        if sensor == 'mix':
+            sensor_list = ['vehicle', 'fusion', 'inf']
+        else:
+            sensor_list = None
+
+        for k in tqdm.tqdm(range(len(self.split_info))):
+            base_data_dict = self.retrieve_base_data(k)
+            sample_idx = self.split_info[k] # 样本编号
+
+            if sensor_list is not None:
+                sensor = random.choice(sensor_list)
+
+            if sensor == 'vehicle':
+                points = base_data_dict[0]['lidar_np']
+                annos = base_data_dict[0]['params']['vehicles_single_all'] #ego coord
+                boxes_lidar = []
+                for anno in annos:
+                    x = anno['3d_location']['x']
+                    y = anno['3d_location']['y']
+                    z = anno['3d_location']['z']
+                    l = anno['3d_dimensions']['l']
+                    h = anno['3d_dimensions']['h']
+                    w = anno['3d_dimensions']['w']
+                    rotation = anno['rotation']
+                    box_lidar = [x,y,z,l,w,h,rotation]
+                    boxes_lidar.append(box_lidar)
+            elif sensor == 'fusion':
+                ego_lidar_pose = base_data_dict[0]['params']['lidar_pose']
+                projected_lidar_stack = []
+                for cav_id, selected_cav_base in base_data_dict.items():
+                    # transformation
+                    transformation_matrix = x1_to_x2(selected_cav_base['params']['lidar_pose'], ego_lidar_pose)
+                    lidar_np = selected_cav_base['lidar_np']
+                    # project the lidar to ego space
+                    lidar_np[:, :3] = \
+                        box_utils.project_points_by_matrix_torch(lidar_np[:, :3], transformation_matrix)
+                    # all these lidar and object coordinates are projected to ego already.
+                    projected_lidar_stack.append(lidar_np)
+                projected_lidar_stack = np.vstack(projected_lidar_stack)
+                points = projected_lidar_stack
+                annos = base_data_dict[0]['params']['vehicles_all'] # 协同下的label
+                boxes_lidar, _ = project_world_objects_dairv2x(annos, ego_lidar_pose)
+            
+            elif sensor == 'inf':
+                ego_lidar_pose = base_data_dict[0]['params']['lidar_pose']
+                if len(base_data_dict) == 1:
+                    continue
+                for cav_id, selected_cav_base in base_data_dict.items():
+                # transformation
+                    if cav_id == 0:
+                        continue
+                    transformation_matrix = x1_to_x2(selected_cav_base['params']['lidar_pose'], ego_lidar_pose)
+                    lidar_np = selected_cav_base['lidar_np']
+                    # project the lidar to ego space
+                    lidar_np[:, :3] = box_utils.project_points_by_matrix_torch(lidar_np[:, :3], transformation_matrix)
+                    # all these lidar and object coordinates are projected to ego already.
+                    points = lidar_np
+                    annos = base_data_dict[0]['params']['vehicles_all']
+                    boxes_lidar, _ = project_world_objects_dairv2x(annos, ego_lidar_pose)
+
+            elif sensor == 'sensor_mix':
+                ego_lidar_pose = base_data_dict[0]['params']['lidar_pose']
+                projected_lidar_stack = []
+                for cav_id, selected_cav_base in base_data_dict.items():
+                    # transformation
+                    transformation_matrix = x1_to_x2(selected_cav_base['params']['lidar_pose'], ego_lidar_pose)
+                    lidar_np = selected_cav_base['lidar_np']
+                    # project the lidar to ego space
+                    lidar_np[:, :3] = box_utils.project_points_by_matrix_torch(lidar_np[:, :3], transformation_matrix)
+                    # all these lidar and object coordinates are projected to ego already.
+                    projected_lidar_stack.append(lidar_np)
+                
+                #instance-level mixup augmentation
+                if len(projected_lidar_stack) == 2:
+                    ego_point_num, inf_point_num = projected_lidar_stack[0].shape[0], projected_lidar_stack[1].shape[0]
+                    mix_ratio = np.random.random()
+                    ego_choose_num = int(ego_point_num * mix_ratio)
+                    inf_choose_num = int(ego_point_num * (1-mix_ratio))
+                    ego_choose_mask = np.random.choice(ego_point_num, ego_choose_num)
+                    inf_choose_mask = np.random.choice(inf_point_num, inf_choose_num)
+                    projected_lidar_stack[0] = projected_lidar_stack[0][ego_choose_mask]
+                    projected_lidar_stack[1] = projected_lidar_stack[1][inf_choose_mask]
+
+
+                projected_lidar_stack = np.vstack(projected_lidar_stack)
+                points = projected_lidar_stack
+                annos = base_data_dict[0]['params']['vehicles_all']
+                boxes_lidar, _ = project_world_objects_dairv2x(annos, ego_lidar_pose)
+
+            else:
+                raise NameError("gt sampling method: {} is not implementated".format(sensor))
+            
+            if len(base_data_dict)  == 1 and sensor == 'inf':
+                continue
+            else:
+                names = np.array([anno['type'] for anno in annos]) # 标签 有各种 ： Car Van Truck Bus 等等
+                gt_boxes = np.array(boxes_lidar) # (n, 7)
+
+                num_obj = gt_boxes.shape[0]
+                point_indices = roiaware_pool3d_utils.points_in_boxes_cpu( # (num_points, 3)
+                    torch.from_numpy(points[:, 0:3]), torch.from_numpy(gt_boxes)
+                ).numpy()  # (nboxes, npoints) # 在gt中的点的索引
+
+                #save early-fusion points
+                # filename_pts = '%s_early_fusion_pts.bin' % (sample_idx)
+                # filepath = database_save_path / filename_pts
+                # with open(filepath, 'w') as f:
+                #     points.tofile(f)
+                #save gt_boxes
+                # filename_gt = '%s_early_fusion_gt' % (sample_idx)
+                # filepath = database_save_path / filename_gt
+                # np.save(filepath, np.array(corners_lidar_list))
+
+                for i in range(num_obj): # 遍历这个样本中的每个gt
+                    filename = '%s_%s_%d.bin' % (sample_idx, names[i], i)
+                    filepath = database_save_path / filename
+                    gt_points = points[point_indices[i] > 0] # (n_points, 4) 这个gt中的所有点
+
+                    gt_points[:, :3] -= gt_boxes[i, :3] # 这个gt中的每个点减去这个gt的中心点，相当于平移到以0为中心
+                    with open(filepath, 'w') as f:
+                        gt_points.tofile(f)
+
+                    if (used_classes is None) or names[i] in used_classes:
+                        db_path = str(filepath.relative_to(self.root_dir))  # gt_database/xxxxx.bin
+                        db_info = {'name': names[i], 'path': db_path, 'image_idx': sample_idx, 'gt_idx': i,
+                                'box3d_lidar': gt_boxes[i], 'num_points_in_gt': gt_points.shape[0]}
+                        if names[i] in all_db_infos:
+                            all_db_infos[names[i]].append(db_info) # 如果这个类别已经有了，就追加在后面
+                        else:
+                            all_db_infos[names[i]] = [db_info]
+        for k, v in all_db_infos.items():
+            print('Database %s: %d' % (k, len(v)))
+
+        with open(db_info_save_path, 'wb') as f:
+            pickle.dump(all_db_infos, f)
+
+
+def train_parser():
+    import argparse
+    parser = argparse.ArgumentParser(description="synthetic data generation")
+    parser.add_argument("--hypes_yaml", "-y", type=str, default='/public/home/lilingzhi/xyj/CoAlign/opencood/hypes_yaml/dairv2x/lidar_only_with_noise/pointpillar_single.yaml',
+                        help='data generation yaml file needed ')
+    parser.add_argument('--model_dir', default='',
+                        help='Continued training path')
+    parser.add_argument('--fusion_method', '-f', default="intermediate",
+                        help='passed to inference.')
+    opt = parser.parse_args()
+    return opt
+
+
+
+if __name__ == '__main__':
+    import opencood.hypes_yaml.yaml_utils as yaml_utils
+    opt = train_parser()
+    hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
+
+    print('Dataset Building')
+    dairv2x_base_dataset = DAIRV2XBaseDataset(hypes, visualize=False, train=True) #[vehicle, inf, cooperative]
+    dairv2x_base_dataset.create_groundtruth_database(sensor='vehicle') #create gt base for [vehicle, fuison, inf, mix, sensor_mix] data
+

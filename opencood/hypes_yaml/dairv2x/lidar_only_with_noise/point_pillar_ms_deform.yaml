@@ -1,4 +1,4 @@
-name: dairv2x_pointpillar_ms_deform_lidar_late_fusion
+name: dairv2x_pointpillar_ms_deform_lidar_late_fusion_layer3
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -110,7 +110,7 @@ model:
       dropout: 0.1
       activation: relu
       n_head: 8
-      num_encoder_layers: 1
+      num_encoder_layers: 3
       enc_n_points: 4
       compression: 0
       # fusion: max

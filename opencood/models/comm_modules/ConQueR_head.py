@@ -494,7 +494,7 @@ class ConQueRHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.1, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.3, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
@@ -603,13 +603,13 @@ class ConQueRHead(nn.Module):
         for k, v in dqs_losses.items():
             loss_all += v
             loss_dict.update({k + "_enc": v.item()})
-        for k, v in dqs_losses.items():
-            loss_dict.update({k + "_debug": v})
+        # for k, v in dqs_losses.items():
+        #     loss_dict.update({k + "_debug": v})
         outputs = pred_dicts['outputs']
         dec_losses = self.compute_losses(outputs, targets, dn_meta)
-        '''for k, v in dec_losses.items():
+        for k, v in dec_losses.items():
             loss_all += v
-            loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失'''
+            loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
 
         # compute contrastive loss
         if dn_meta is not None:
@@ -647,8 +647,8 @@ class ConQueRHead(nn.Module):
                             ) # （3， 1） 
                             contrastive_loss += loss_gti.mean() # 3组gt对比，求均值再加上去
                     loss_contrastive_dec_li = self.contras_loss_coeff * contrastive_loss / num_gts # 乘上系数=0.2后要除以gt总数，以均衡不同样本的gt数不同引起的数值波动
-                    '''loss_all += loss_contrastive_dec_li
-                    loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})'''
+                    loss_all += loss_contrastive_dec_li
+                    loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
 
         # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
         # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d.to(torch.float32), gt_bboxes_3d_mask, None) # 前景预测损失
