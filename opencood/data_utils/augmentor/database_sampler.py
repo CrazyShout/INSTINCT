@@ -477,7 +477,8 @@ class DataBaseSampler(object):
             if int(sample_group['sample_num']) > 0:
                 sampled_dict = self.sample_with_fixed_number(class_name, sample_group) # [Dicrt1, Dict2...]采样固定个数的gt，默认是15个
                 
-                if self.sampler_cfg['BOX_ORDER'] == 'lwh':
+                # 我们在生成gt base的时候是用的lwh的顺序载入的，因此如果实际是hwl（比如之前的基线），那就要在读出来的时候给它调整回去
+                if self.sampler_cfg['BOX_ORDER'] == 'hwl':
                     #change the order from 'lwh' to 'hwl'
                     for dict in sampled_dict:
                         dict['box3d_lidar'][[5,4,3]] = dict['box3d_lidar'][[3,4,5]]

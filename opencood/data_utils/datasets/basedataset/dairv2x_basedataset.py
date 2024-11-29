@@ -67,7 +67,8 @@ class DAIRV2XBaseDataset(Dataset):
         self.pre_processor = build_preprocessor(params["preprocess"], train)
         self.post_processor = build_postprocessor(params["postprocess"], train)
         self.post_processor.generate_gt_bbx = self.post_processor.generate_gt_bbx_by_iou
-        self.data_augmentor = DataAugmentor(params['data_augment'], train, params['data_dir'], params['class_names'])
+        class_names = params.get('class_names', ['Car'])
+        self.data_augmentor = DataAugmentor(params['data_augment'], train, params['data_dir'], class_names)
 
         if 'clip_pc' in params['fusion']['args'] and params['fusion']['args']['clip_pc']:
             self.clip_pc = True
