@@ -4,6 +4,7 @@ root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
 test_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
 
+class_names: ['Car']
 
 yaml_parser: "load_point_pillar_params"
 train_params:
@@ -38,8 +39,24 @@ preprocess:
   cav_lidar_range: &cav_lidar [-100.8, -40, -3.5, 100.8, 40, 1.5]
 
 data_augment:
+  - NAME: gt_sampling
+    USE_ROAD_PLANE: False
+    DB_INFO_PATH:
+        - dairv2x_dbinfos_fusion.pkl #[fusion, vehilce]
+    PREPARE: {
+        filter_by_min_points: ['Car:5'],
+        # filter_by_difficulty: [-1],
+    }
+
+    SAMPLE_GROUPS: ['Car:15']
+    NUM_POINT_FEATURES: 4
+    DATABASE_WITH_FAKELIDAR: False
+    REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+    LIMIT_WHOLE_SCENE: False
+    BOX_ORDER: 'lwh'
+
   - NAME: random_world_flip
-    ALONG_AXIS_LIST: [ 'x' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
+    ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
 
   - NAME: random_world_rotation
     WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
@@ -70,7 +87,7 @@ postprocess:
     pos_threshold: 0.6
     neg_threshold: 0.45
     score_threshold: 0.20
-  order: 'hwl' # hwl or lwh
+  order: 'lwh' # hwl or lwh
   max_num: 100 # maximum number of objects in a single frame. use this number to make sure different frames has the same dimension in the same batch
   nms_thresh: 0.15
   dir_args: &dir_args
@@ -115,9 +132,9 @@ model:
         input_features: 384
         hidden_channel: 256
         num_heads: 8
-        dropout: 0.0
+        dropout: 0.1
         activation: 'gelu'
-        ffn_channel: 1024
+        ffn_channel: 256
         num_decoder_layers: 3
         cp: True
         keep_ratio: 0.3 # 这个是计算前景预测时候保留的比例
@@ -128,7 +145,7 @@ model:
             enabled: True
             dn_number: 3
             dn_box_noise_scale: 0.4
-            dn_label_noise_ratio: 0.5
+            dn_label_noise_ratio: 0
 
         contrastive:
             mom: 0.999
@@ -160,18 +177,6 @@ model:
     #   dim: [ 256 ]
     #   input_dim: 384 # 128 * 3
 
-    POST_PROCESSING:
-        RECALL_THRESH_LIST: [ 0.3, 0.5, 0.7 ]
-
-        EVAL_METRIC: waymo
-
-        NOT_APPLY_NMS_FOR_VEL: True
-        NMS_CONFIG:
-            MULTI_CLASSES_NMS: True
-            NMS_THRESH: [ 0.7, 0.6, 0.55 ]
-            NMS_PRE_MAXSIZE: [ 4096, 4096, 4096 ]
-            NMS_POST_MAXSIZE: [ 500, 500, 500 ]
-
 loss:
   core_method: point_pillar_loss
   args:
@@ -193,13 +198,13 @@ loss:
 
 optimizer:
   core_method: AdamW
-  lr: 0.001
+  lr: 1e-4
   args:
     eps: 1e-10
     weight_decay: 1e-2
 
 lr_scheduler:
-  core_method: multistep #step, multistep and Exponential support
-  gamma: 0.1
+  core_method: Exponential #step, multistep and Exponential support
+  gamma: 0.9
   step_size: [10, 15]
 

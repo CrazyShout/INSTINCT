@@ -165,8 +165,12 @@ def main():
     result_stat = {0.3: {'tp': [], 'fp': [], 'gt': 0, 'score': []},                
                 0.5: {'tp': [], 'fp': [], 'gt': 0, 'score': []},                
                 0.7: {'tp': [], 'fp': [], 'gt': 0, 'score': []}}
+    metric = {
+        'gt_num': 0,
+    }
+    for cur_thresh in [0.3, 0.5, 0.7]:
+        metric['recall_rcnn_%s' % str(cur_thresh)] = 0
 
-    
     infer_info = opt.fusion_method + opt.note
 
     print(f"==={infer_info}===")
@@ -190,9 +194,10 @@ def main():
                                                                 model,
                                                                 opencood_dataset)
             elif opt.fusion_method == 'no':
-                infer_result = inference_utils.inference_no_fusion(batch_data,
+                infer_result = inference_utils.inference_no_fusion_simple(batch_data,
                                                                 model,
-                                                                opencood_dataset)
+                                                                opencood_dataset,
+                                                                metric)
             elif opt.fusion_method == 'no_w_uncertainty':
                 infer_result = inference_utils.inference_no_fusion_w_uncertainty(batch_data,
                                                                 model,

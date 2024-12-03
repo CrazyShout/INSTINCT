@@ -9,10 +9,10 @@ from torch import nn
 
 from opencood.pcdet_utils.roiaware_pool3d import roiaware_pool3d_utils
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
-from .target_assigner.hungarian_assigner_qs import HungarianMatcher3d, generalized_box3d_iou, \
+from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
-from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process_w_ious
-from opencood.models.sub_modules.seed_transformer import SEEDTransformer, MLP, get_clones
+from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
+from opencood.models.sub_modules.TrasIFF_transformer import Transformer, MLP, get_clones, TransIFFEncoder, CrossDomainAdaption
 
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -21,6 +21,120 @@ def inverse_sigmoid(x, eps=1e-5):
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
 
+class PositionEmbeddingSine_w_Trans(nn.Module):
+    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None, voxel_size=[0.1,0.1,0.1], feature_map_stride=8):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats # 128
+        self.temperature = temperature
+        self.normalize = normalize
+        self.discrete_ratio = voxel_size[0]  # voxel_size[0]=0.1 体素大小
+        self.downsample_rate = feature_map_stride # 8倍下采样
+
+        if scale is not None and normalize is False:
+            raise ValueError("normalize should be True if scale is passed")
+        if scale is None:
+            scale = 2 * math.pi
+        self.scale = scale
+
+    def regroup(self, x, record_len):
+        cum_sum_len = torch.cumsum(record_len, dim=0)
+        split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
+        return split_x
+
+    def transform_position_matrix(self, position_matrix, transform_matrix):
+        # position_matrix 是 B x H x W x 2 的相对位置矩阵
+        # transform_matrix 是 B x 3 x 3 的变换矩阵
+        
+        B, H, W, _ = position_matrix.shape
+        transformed_positions = torch.zeros_like(position_matrix)
+        
+        # 对每个批次进行处理
+        for b in range(B):
+            # 获取当前批次的变换矩阵
+            transform = transform_matrix[b]
+            
+            # 对每个位置进行变换
+            for i in range(H):
+                for j in range(W):
+                    # 获取当前位置的相对坐标 (x, y)
+                    x, y = position_matrix[b, i, j]
+                    
+                    # 将 (x, y) 转换为齐次坐标 (x, y, 1)
+                    original_coords = torch.tensor([x, y, 1.0])  # 齐次坐标
+                    
+                    # 应用变换矩阵
+                    transformed_coords = torch.matmul(transform, original_coords.float())
+
+                    # 获取变换后的坐标（不再需要齐次坐标）
+                    transformed_position = transformed_coords[:2]  # 只取 x, y
+
+                     # 四舍五入
+                    transformed_position = torch.round(transformed_position)
+                    
+                    transformed_positions[b, i, j] = transformed_position
+        
+        return transformed_positions
+    
+    def forward(self, x, mask=None, pairwise_t_matrix=None, record_len=None):
+        '''
+        pairwise_t_matrix: shape (B,L,L,2,3)
+        '''
+        if pairwise_t_matrix is None:
+            raise ValueError("transform PE must have transform matrix")
+        _, C, H, W = x.shape
+        B, L = pairwise_t_matrix.shape[:2]
+        pairwise_t_matrix = pairwise_t_matrix[:,:,:,[0, 1],:][:,:,:,:,[0, 1, 3]] # [B, L, L, 2, 3]
+        # pairwise_t_matrix[...,0,1] = pairwise_t_matrix[...,0,1] * H / W # XXX 这个地方需要缩放吗？没想懂，先放着，感觉是不需要的
+        # pairwise_t_matrix[...,1,0] = pairwise_t_matrix[...,1,0] * W / H
+        pairwise_t_matrix[...,0,2] = pairwise_t_matrix[...,0,2] / (self.downsample_rate * self.discrete_ratio)
+        pairwise_t_matrix[...,1,2] = pairwise_t_matrix[...,1,2] / (self.downsample_rate * self.discrete_ratio)
+        if mask is not None:
+            not_mask = ~mask
+            y_embed = not_mask.cumsum(1, dtype=torch.float32)
+            x_embed = not_mask.cumsum(2, dtype=torch.float32)
+        else:
+            size_h, size_w = x.shape[-2:]
+            y_embed = torch.arange(1, size_h + 1, dtype=x.dtype, device=x.device)
+            x_embed = torch.arange(1, size_w + 1, dtype=x.dtype, device=x.device)
+            y_embed, x_embed = torch.meshgrid(y_embed, x_embed) # (H, W,)
+            x_embed = x_embed.unsqueeze(0).repeat(x.shape[0], 1, 1) # (B_N, H, W,)
+            y_embed = y_embed.unsqueeze(0).repeat(x.shape[0], 1, 1)
+            position_encoding = torch.stack((y_embed, x_embed), dim=-1) # (B_N, H, W, 2)
+
+            last_row = torch.tensor([[[0, 0, 1]]], dtype=x.dtype, device=x.device)  # (1, 1, 1, 3)
+            last_row = last_row.repeat(B, L, L, 1, 1)  # 扩展到 (B, L, L, 1, 3)
+            pairwise_t_matrix = torch.cat([pairwise_t_matrix, last_row], dim=3)  # 在第3维拼接 (B, L, L, 3, 3)
+            batch_pos = self.regroup(position_encoding, record_len) # List[(2, H, W, 2), ...] len==B
+            b_pos_list = []
+            for b in range(B):
+                N = record_len[b]
+                t_matrix = pairwise_t_matrix[b][:N, 0, :, :] # (2, 3，3) 每个agent到ego的变换矩阵
+                b_pos = batch_pos[b] # (2, H, W, 2)
+                assert t_matrix.shape[0] == b_pos.shape[0]
+                b_pos_trans = self.transform_position_matrix(b_pos, t_matrix) # 相对位置编码进行了坐标变换
+                b_pos_list.append(b_pos_trans)
+            position_encoding = torch.cat(b_pos_list, dim=0) # (B_N, H, W, 2)
+            y_embed = position_encoding[..., 0]
+            x_embed = position_encoding[..., 1]
+            # 生成一维位置编码
+            new_size_w  = torch.max(x_embed) + 1
+            one_d_position_encoding = y_embed * new_size_w + x_embed  # (B_N, H, W) 放到一个更大的全局网格里避免1D编码冲突
+
+        if self.normalize:
+            eps = 1e-6
+            y_embed = (y_embed - 0.5) / (y_embed[:, -1:, :] + eps) * self.scale
+            x_embed = (x_embed - 0.5) / (x_embed[:, :, -1:] + eps) * self.scale
+
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (2 * dim_t.div(2, rounding_mode="floor") / self.num_pos_feats) # (128, )
+
+        pos_x = x_embed[:, :, :, None] / dim_t # b, h, w, 1 除以 频率缩放后 为 b, h, w, 128
+        pos_y = y_embed[:, :, :, None] / dim_t
+        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3) # b, h, w, 128
+        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+
+        return pos, one_d_position_encoding.squeeze(-1)
 
 class PositionEmbeddingSine(nn.Module):
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
@@ -43,8 +157,8 @@ class PositionEmbeddingSine(nn.Module):
             size_h, size_w = x.shape[-2:]
             y_embed = torch.arange(1, size_h + 1, dtype=x.dtype, device=x.device)
             x_embed = torch.arange(1, size_w + 1, dtype=x.dtype, device=x.device)
-            y_embed, x_embed = torch.meshgrid(y_embed, x_embed)
-            x_embed = x_embed.unsqueeze(0).repeat(x.shape[0], 1, 1)
+            y_embed, x_embed = torch.meshgrid(y_embed, x_embed) # (H, W,)
+            x_embed = x_embed.unsqueeze(0).repeat(x.shape[0], 1, 1) # (B, H, W,)
             y_embed = y_embed.unsqueeze(0).repeat(x.shape[0], 1, 1)
 
         if self.normalize:
@@ -65,7 +179,7 @@ class PositionEmbeddingSine(nn.Module):
 
 
 class Det3DHead(nn.Module):
-    def __init__(self, hidden_dim, num_classes=3, code_size=7, num_layers=1):
+    def __init__(self, hidden_dim, num_classes=1, code_size=7, num_layers=1):
         super().__init__()
         class_embed = MLP(hidden_dim, hidden_dim, num_classes, 3) # (B, L, 3)
         bbox_embed = MLP(hidden_dim, hidden_dim, code_size, 3) # (B, L, 7)
@@ -79,16 +193,22 @@ class Det3DHead(nn.Module):
         self.class_embed = get_clones(class_embed, num_layers)
         self.bbox_embed = get_clones(bbox_embed, num_layers)
 
-        iou_embed = MLP(hidden_dim, hidden_dim, 1, 3) # 每个预测框的IoU估计值
-        nn.init.constant_(iou_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(iou_embed.layers[-1].bias.data, 0)
-        self.iou_embed = get_clones(iou_embed, num_layers)
+        # iou_embed = MLP(hidden_dim, hidden_dim, 1, 3) # 每个预测框的IoU估计值
+        # nn.init.constant_(iou_embed.layers[-1].weight.data, 0)
+        # nn.init.constant_(iou_embed.layers[-1].bias.data, 0)
+        # self.iou_embed = get_clones(iou_embed, num_layers)
 
     def forward(self, embed, anchors, layer_idx=0):
+        # print("embed shape is", embed.shape)
+        # print("anchors shape is", anchors.shape)
+        # print("anchors  is", anchors)
+
         cls_logits = self.class_embed[layer_idx](embed)
         box_coords = (self.bbox_embed[layer_idx](embed) + inverse_sigmoid(anchors)).sigmoid() # 这里类似锚框的机制，逆转回实数空间加上预测的偏移，最后重新归一化
-        pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
-        return cls_logits, box_coords, pred_iou
+        # print("box_coords is", box_coords)
+
+        # pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
+        return cls_logits, box_coords
 
 
 class MaskPredictor(nn.Module):
@@ -120,19 +240,22 @@ class MaskPredictor(nn.Module):
         return out
 
 
-class SEEDHead(nn.Module):
+class TransIFFRHead(nn.Module):
     def __init__(
             self,
             model_cfg, input_channels, num_class, class_names, grid_size, point_cloud_range, voxel_size,
             predict_boxes_when_training=True, train_flag=True
     ):
-        super(SEEDHead, self).__init__()
+        super(TransIFFRHead, self).__init__()
 
         self.grid_size = grid_size # [2016, 800, 50]
         self.point_cloud_range = point_cloud_range # [-75.2, -75.2, -2, 75.2, 75.2, 4]
         self.voxel_size = voxel_size # [0.1, 0.1, 0.15]
         self.feature_map_stride = model_cfg['feature_map_stride'] # 8
         self.num_classes = num_class # 1
+
+        self.discrete_ratio = voxel_size[0]  # voxel_size[0]=0.4    
+        self.downsample_rate = self.feature_map_stride
 
         self.model_cfg = model_cfg
         self.train_flag = train_flag
@@ -161,6 +284,7 @@ class SEEDHead(nn.Module):
         )
 
         self.pos_embed = PositionEmbeddingSine(self.hidden_channel // 2)
+        self.pos_embed_w_trans = PositionEmbeddingSine_w_Trans(self.hidden_channel // 2)
 
         for module in self.input_proj.modules():
             if isinstance(module, nn.Conv2d):
@@ -168,21 +292,38 @@ class SEEDHead(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
-        self.mask_predictor = MaskPredictor(self.hidden_channel)
-
-        self.transformer = SEEDTransformer(
+        # self.mask_predictor = MaskPredictor(self.hidden_channel)
+                    
+        self.encoder = TransIFFEncoder(
             d_model=self.hidden_channel, # 256
             nhead=num_heads, # 8
             nlevel=1,
+            num_encoder_layers=num_decoder_layers, # 6
             num_decoder_layers=num_decoder_layers, # 6
             dim_feedforward=ffn_channel, # 1024
             dropout=dropout, # 0.0
             activation=activation, # gelu
             num_queries=self.num_queries, # 1000
-            keep_ratio=self.keep_ratio, # 0.3
-            code_size=self.code_size, # 7
-            iou_rectifier=self.iou_rectifier, # [ 0.68, 0.71, 0.65 ]
-            iou_cls=self.iou_cls, # [0, 1]
+            num_classes=num_class, # 3
+            cp_flag=cp_flag # True
+        )
+
+        self.cross_domain_attention = CrossDomainAdaption(
+            d_model=self.hidden_channel, 
+            nhead=num_heads, 
+            dropout=dropout, 
+            activation=activation)
+
+        self.transformer = Transformer(
+            d_model=self.hidden_channel, # 256
+            nhead=num_heads, # 8
+            nlevel=1,
+            num_encoder_layers=num_decoder_layers, # 6
+            num_decoder_layers=num_decoder_layers, # 6
+            dim_feedforward=ffn_channel, # 1024
+            dropout=dropout, # 0.0
+            activation=activation, # gelu
+            num_queries=self.num_queries, # 1000
             num_classes=num_class, # 3
             cp_flag=cp_flag # True
         )
@@ -228,9 +369,6 @@ class SEEDHead(nn.Module):
             cost_bbox=self.model_cfg['target_assigner_config']['hungarian_assigner']['bbox_cost'],   # 4.0
             cost_giou=self.model_cfg['target_assigner_config']['hungarian_assigner']['iou_cost'],    # 2.0
             cost_rad=self.model_cfg['target_assigner_config']['hungarian_assigner']['rad_cost'],     # 4.0
-            decode_bbox_func=self.decode_bbox,
-            iou_rectifier = self.iou_rectifier,
-            iou_cls=self.iou_cls # [0, 1]
         )
 
         weight_dict = {
@@ -258,21 +396,92 @@ class SEEDHead(nn.Module):
                     aux_weight_dict.update({k + f"_{i}": v for k, v in self.losses.weight_dict.items()})
                 self.losses.weight_dict.update(aux_weight_dict)
 
+    def regroup(self, x, record_len):
+        cum_sum_len = torch.cumsum(record_len, dim=0)
+        split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
+        return split_x
+    
     def predict(self, batch_dict):
         batch_size = batch_dict['batch_size']
-        spatial_features_2d = batch_dict['spatial_features_2d'] # B, 512, H, W
+        spatial_features_2d = batch_dict['spatial_features_2d'] # B_N, 512, H, W
+        record_len = batch_dict['record_len'] # 举个例子，batch size == 4时，形如List[2, 2, 2, 2]，表示每个场景样本下的agent数目为2，即一车一路
+        pairwise_t_matrix = batch_dict['pairwise_t_matrix'] # (B_N, L, L, 4, 4)
+        Bn, C, H, W = spatial_features_2d.shape # Bn = 2*B 因为每个场景下都有2个agent
+
+        # (B,L,L,2,3)
+        # pairwise_t_matrix = pairwise_t_matrix[:,:,:,[0, 1],:][:,:,:,:,[0, 1, 3]] # [B, L, L, 2, 3]
+        # pairwise_t_matrix[...,0,1] = pairwise_t_matrix[...,0,1] * H / W
+        # pairwise_t_matrix[...,1,0] = pairwise_t_matrix[...,1,0] * W / H
+        # pairwise_t_matrix[...,0,2] = pairwise_t_matrix[...,0,2] / (self.downsample_rate * self.discrete_ratio * W) * 2
+        # pairwise_t_matrix[...,1,2] = pairwise_t_matrix[...,1,2] / (self.downsample_rate * self.discrete_ratio * H) * 2
 
         features = []
         pos_encodings = []
         features.append(self.input_proj(spatial_features_2d)) # 放入一个B，256，H，W
         pos_encodings.append(self.pos_embed(spatial_features_2d)) # 位置编码 B，256， H， W
 
-        score_mask = self.mask_predictor(features[0]) # B, H, W
+        outputs = self.encoder(
+            src=features, # [(B, 256, H, W)]
+            pos=pos_encodings, # [(B, 256, H, W)]
+            noised_gt_box=None, # (B, pad_size, 7)
+            noised_gt_onehot=None, # (B, pad_size, num_classes) num_classes=1
+            attn_mask=None, # (1000+pad_size, 1000+pad_size)
+            targets=None, # [Sample1:Dict, Sample2:Dict...]
+        )
+
+        '''
+        hidden_state: (B, query_num, 256) 这是encoder的输出
+        init_reference: (B,  query_num, 8) encoder筛选出来的参考框
+        inter_references: (6, B, pad_size + 1000 + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
+        src_embed: (B, H*W, 256) 粗查询, 经过了一层DGA layer后scatter回去
+        src_ref_windows: (B, H * W, 7) 参考框，类似于锚框
+        src_indexes: (B, query_num, 1) query_num 个fined query 索引
+        '''
+        hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
+
+        # 单车部分已经准备好了query，接下来要准备变换后的相对位置编码以及进行filter高置信度的
+        pos_w_trans, pos_w_trans_1d = self.pos_embed_w_trans(spatial_features_2d) # (B_N, 256, H, W) 和 1D 相对位置编码 (B_N, H, W, 1) 用来做Feature Magnet 
+        pos_w_trans.view(pos_w_trans.shape[0], pos_w_trans.shape[1], -1).transpose(1,2) # (B_N,  HW, 256)
+        pos_w_trans_1d.view(pos_w_trans_1d.shape[0], -1, 1) # (B_N,  HW, 1)
+
+        pos_w_trans = torch.gather(pos_w_trans, 1, src_indexes.expand(-1, -1, pos_w_trans.shape[-1])) # (B_N,  query_num, 256)
+        pos_w_trans_1d = torch.gather(pos_w_trans_1d, 1, src_indexes.expand(-1, -1, pos_w_trans_1d.shape[-1])) # (B_N,  query_num, 1)
+
+        ref_w, probs = init_reference[...,:7], init_reference[...,7:] # (B_N,  query_num, 7), (B_N,  query_num, 1)
+        filter_num = math.ceil(self.num_queries * 0.1) # 保留10%的数量 这一点复现的时候和TransIFF不一样，TransIFF是用分数过滤，但是我们不这样做
+        select_probs_mask, indices = torch.topk(probs, k=filter_num, dim=-1) # 选出来的是(B_N,  query_num * 0.1, 1) 
+        ref_w = torch.gather(ref_w, 1, indices.expand(-1, -1, ref_w.shape[-1])) # (B_N,  query_num * 0.1, 7)
+        
+        select_pos_w_trans = torch.gather(pos_w_trans, 1, indices.expand(-1, -1, pos_w_trans.shape[-1])) # (B_N,  query_num * 0.1, 256)
+        select_pos_w_trans_1d = torch.gather(pos_w_trans_1d, 1, indices.expand(-1, -1, pos_w_trans_1d.shape[-1])) # (B_N,  query_num * 0.1, 1) 1D位置编码
+        select_hidden_state = torch.gather(hidden_state, 1, indices.expand(-1, -1, hidden_state.shape[-1])) # (B_N,  query_num * 0.1, 256)
+        select_hidden_state_batch = self.regroup(select_hidden_state, record_len)
+        select_pos_w_trans_batch = self.regroup(select_pos_w_trans, record_len)
+        select_pos_w_trans_1d_batch = self.regroup(select_pos_w_trans_1d, record_len)
+        for b in range(Bn):
+            b_hidden_state = select_hidden_state_batch[b] # (N, query_num * 0.1, 256)
+            b_pos_w_trans = select_pos_w_trans_batch[b] # (N, query_num * 0.1, 256)
+            b_pos_w_trans_1d = select_pos_w_trans_1d_batch[b] # (N, query_num * 0.1, 1)
+            N = len(b_hidden_state.shape[0])
+            feat_list = []
+            pos_list = []
+            for i in range(N):
+                feat_list.append(b_hidden_state[i:i+1])
+                pos_list.append(b_pos_w_trans[i:i+1])
+            feat_res_lst = self.cross_domain_attention(feat_list, pos_list) # [(1, l1, C), (1, l2, C)] 
+
+        
+
+
+
+
+        # score_mask = self.mask_predictor(features[0]) # B, H, W
 
         dn = self.dn
         if self.train_flag and dn['enabled'] and dn['dn_number'] > 0:
             gt_boxes = batch_dict['object_bbx_center'] # B, maxnum, 7
             gt_boxes_mask = batch_dict['object_bbx_mask'] # B, maxnum
+
             targets = list() # 列表存放每个样本的标签
             for batch_idx in range(batch_size):
                 target = {}
@@ -312,7 +521,6 @@ class SEEDHead(nn.Module):
             input_query_label, # (B, pad_size, num_classes) num_classes=1
             attn_mask, # (1000+pad_size, 1000+pad_size)
             targets=targets, # [Sample1:Dict, Sample2:Dict...]
-            score_mask=score_mask, # (B, H, W)
         )
         '''
         hidden_state: (6, B, pad_size + 1000 + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是6层decoder的输出
@@ -327,88 +535,78 @@ class SEEDHead(nn.Module):
         # decoder
         outputs_classes = []
         outputs_coords = []
-        outputs_ious = []
         for idx in range(hidden_state.shape[0]): # 这里是遍历6层
             if idx == 0:
                 reference = init_reference
             else:
                 reference = inter_references[idx - 1]
-            outputs_class, outputs_coord, outputs_iou = self.transformer.decoder.detection_head(hidden_state[idx], # 每一层明明已经产出过对应的结果了，为什么有又进行一遍输出头？答：对比学习的辅助输出参数不同步，这里应该是这个考虑？
+            outputs_class, outputs_coord = self.transformer.decoder.detection_head(hidden_state[idx], # 每一层明明已经产出过对应的结果了，为什么有又进行一遍输出头？答：对比学习的辅助输出参数不同步，这里应该是这个考虑？
                                                                                                 reference, idx) # 根据每一层的query特征，和reference重新来一次输出头，但是与之前不一样的是，这次会带上GT以及GT噪声正样本， 这部分来自于对比学习
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
-            outputs_ious.append(outputs_iou)
         outputs_class = torch.stack(outputs_classes) # (6, B, pad_size + 1000 + 4*max_gt_num, 1)
         outputs_coord = torch.stack(outputs_coords) # (6, B, pad_size + 1000 + 4*max_gt_num, 7)
-        outputs_iou = torch.stack(outputs_ious) # (6, B, pad_size + 1000 + 4*max_gt_num, 1)
 
         # dn post process
         '''
         去噪组分开
         outputs_class:  (6, B, 1000 + 4*max_gt_num, 1)
         outputs_coord:  (6, B, 1000 + 4*max_gt_num, 7)
-        outputs_iou:    (6, B, 1000 + 4*max_gt_num, 1)
         dn_meta = {
             "pad_size":                 2 * max_gt_num * 3
             "num_dn_group":             3
             "output_known_lbs_bboxes":  {
                 "pred_logits":  (B, pad_size, 1) 最后一层的预测结果 这个是噪声样本
                 "pred_boxes":   (B, pad_size, 7) 
-                "pred_ious":    (B, pad_size, 1) 
-                "aux_outputs":  List[Dict{"pred_logits": (B, pad_size, 3), "pred_boxes": (B, pad_size, 7), "pred_ious": (B, pad_size, 1)}, ...] 五个，表示每一层的噪声样本                 
+                "aux_outputs":  List[Dict{"pred_logits": (B, pad_size, 3), "pred_boxes": (B, pad_size, 7), ...] 五个，表示每一层的噪声样本                 
             }
         }
         '''
         if dn['dn_number'] > 0 and dn_meta is not None:
-            outputs_class, outputs_coord, outputs_iou = dn_post_process_w_ious(
+            outputs_class, outputs_coord = dn_post_process(
                 outputs_class,
                 outputs_coord,
-                outputs_iou,
                 dn_meta,
                 self.aux_loss, # 使用辅助损失
                 self._set_aux_loss,
             )
 
         # only for supervision
-        dqs_outputs = None
+        enc_outputs = None
         if self.train_flag: # 防止梯度流被污染，DQS只是辅助筛选query，筛选时不能参与梯度计算，否则训练早期低质量的query会大幅度影响结果，因此在DQS中必须要detach
-            dqs_class, dqs_coords, dqs_ious = self.transformer.proposal_head(src_embed, src_ref_windows) # 这个之前是dqs打分用的，这里输入的是和当时一样的输入，即获得当时的打分结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
-            dqs_outputs = {
+            enc_class, enc_coords = self.transformer.proposal_head(src_embed, src_ref_windows) # 这个之前是dqs打分用的，这里输入的是和当时一样的输入，即获得当时的打分结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
+            enc_outputs = {
                 'topk_indexes': src_indexes,    # (B, 1000, 1) # 通过dqs挑选的1000个query的索引
-                'pred_logits': dqs_class,       # (B, H*W, 1)
-                'pred_boxes': dqs_coords,       # (B, H*W, 7)
-                'pred_ious': dqs_ious           # (B, H*W, 1)
+                'pred_logits': enc_class,       # (B, H*W, 1)
+                'pred_boxes': enc_coords,       # (B, H*W, 7)
             }
 
         # compute decoder losses
         outputs = {
-            "pred_scores_mask": score_mask, # (B, H, W)
+            # "pred_scores_mask": score_mask, # (B, H, W)
             "pred_logits": outputs_class[-1][:, : self.num_queries],    # (B, 1000, 1) # 最后一层
             "pred_boxes": outputs_coord[-1][:, : self.num_queries],     # (B, 1000, 7)
-            'pred_ious': outputs_iou[-1][:, : self.num_queries],        # (B, 1000, 1)
             "aux_outputs": self._set_aux_loss(
-                outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],
-                outputs_iou[:-1, :, : self.num_queries],                # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), "pred_ious": (B, 1000, 1)}, ...] 5个元素 表示前五层的1000个query
+                outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
             ),
         }
         if self.train_flag:
             '''
-            pred_dicts:         {"dqs_outputs":  Dict()
+            pred_dicts:         {"enc_outputs":  Dict()
                                 "outputs":      Dict()}
             outputs_class:      (6, B, 1000 + 4*max_gt_num, 1)
             outputs_coord:      (6, B, 1000 + 4*max_gt_num, 7)
-            outputs_iou:        (6, B, 1000 + 4*max_gt_num, 1)
             dn_meta:            Dict() 去噪数据
             '''
-            pred_dicts = dict(dqs_outputs=dqs_outputs, outputs=outputs)
-            return pred_dicts, outputs_class, outputs_coord, outputs_iou, dn_meta
+            pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
+            return pred_dicts, outputs_class, outputs_coord, dn_meta
         else:
-            pred_dicts = dict(dqs_outputs=dqs_outputs, outputs=outputs)
+            pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
             return pred_dicts
 
     def forward(self, batch_dict):
         if self.train_flag:
-            pred_dicts, outputs_class, outputs_coord, outputs_iou, dn_meta = self.predict(batch_dict)
+            pred_dicts, outputs_class, outputs_coord, dn_meta = self.predict(batch_dict)
         else:
             pred_dicts = self.predict(batch_dict)
 
@@ -421,8 +619,7 @@ class SEEDHead(nn.Module):
             gt_labels_3d = gt_bboxes_3d.new_ones(gt_bboxes_3d_mask.size(0), gt_bboxes_3d_mask.size(1))
             gt_labels_3d = gt_labels_3d.long() - 1 # (B, maxnum)
 
-            loss, tb_dict = self.loss(gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta, outputs_class, outputs_coord,
-                                      outputs_iou)
+            loss, tb_dict = self.loss(gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta, outputs_class, outputs_coord)
             batch_dict['loss'] = loss
             batch_dict['tb_dict'] = tb_dict
         return batch_dict
@@ -431,11 +628,7 @@ class SEEDHead(nn.Module):
         outputs = pred_dicts['outputs']
         out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
         out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
-        out_iou = (outputs['pred_ious'] + 1) / 2 # (B, 1000, 1) 映射到0-1
         batch_size = out_logits.shape[0]
-
-        out_iou = out_iou.repeat([1, 1, out_logits.shape[-1]])
-        out_iou = out_iou.view(out_logits.shape[0], -1) # （B, 1000）
 
         out_prob = out_logits.sigmoid()
         out_prob = out_prob.view(out_logits.shape[0], -1) # (B, 1000)
@@ -452,7 +645,6 @@ class SEEDHead(nn.Module):
             out_prob_i = out_prob[i] # （1000，）
             out_bbox_i = out_bbox[i] # (1000, 7)
 
-            out_iou_i = out_iou[i] # (1000, )
             '''
             # out_prob_i_ori = out_prob_i.view(out_bbox_i.shape[0], -1)  # [1000, 3]
             # max_out_prob_i, pred_cls = torch.max(out_prob_i_ori, dim=-1)
@@ -510,12 +702,11 @@ class SEEDHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.3, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.25, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
 
-            ious = out_iou_i[topk_indices_i] # (n, )
 
             scores_list = list()
             labels_list = list()
@@ -524,21 +715,8 @@ class SEEDHead(nn.Module):
             for c in range(self.num_classes):
                 mask = (labels - 1) == c # 对于分类无关来说其实是全True ，(n, ), 对于多分类的来说其实就是依次处理每个分类用的
                 scores_temp = scores[mask]
-                ious_temp = ious[mask]
                 labels_temp = labels[mask]
                 boxes_temp = boxes[mask]
-
-                if c in self.iou_cls:
-                    if isinstance(self.iou_rectifier, list):
-                        iou_rectifier = torch.tensor(self.iou_rectifier).to(out_prob)[c]
-                        scores_temp = torch.pow(scores_temp, 1 - iou_rectifier) * torch.pow(ious_temp,
-                                                                                            iou_rectifier)
-                    elif isinstance(self.iou_rectifier, float): # 类别无关 0.68 这又是在算质量得分
-                        scores_temp = torch.pow(scores_temp, 1 - self.iou_rectifier) * torch.pow(ious_temp,
-                                                                                                 self.iou_rectifier)
-                    else:
-                        raise TypeError('only list or float')
-
 
                 scores_list.append(scores_temp)
                 labels_list.append(labels_temp)
@@ -608,8 +786,7 @@ class SEEDHead(nn.Module):
 
         return loss_score
 
-    def loss(self, gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta=None, outputs_class=None, outputs_coord=None,
-             outputs_iou=None):
+    def loss(self, gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta=None, outputs_class=None, outputs_coord=None):
         loss_all = 0
         loss_dict = dict()
         targets = list()
@@ -627,14 +804,15 @@ class SEEDHead(nn.Module):
             target['labels'] = valid_labels
             targets.append(target)
 
-        dqs_outputs = pred_dicts['dqs_outputs']
+        enc_outputs = pred_dicts['enc_outputs']
         bin_targets = copy.deepcopy(targets)
-        # [tgt["labels"].fill_(0) for tgt in bin_targets] NOTE 这个是Github Issue提出的，注释掉后带来了0.2-0.3的提升，这是为什么？ 如果不注释，其实就变成类别无关预测
-        dqs_losses = self.compute_losses(dqs_outputs, bin_targets) # dqs的结果先作为detect输出监督dqs质量选择
+        # [tgt["labels"].fill_(0) for tgt in bin_targets] NOTE 这个是Github Issue提出的，注释掉后带来了0.2-0.3的提升，这是为什么？ 如果不注释，其实就变成类别无关预测 答：其实这里就是ConQuer的代码中的设置 作者忘删除了，seed 中的dqs就是需要多分类的
+        dqs_losses = self.compute_losses(enc_outputs, bin_targets) # dqs的结果先作为detect输出监督dqs质量选择
         for k, v in dqs_losses.items():
             loss_all += v
-            loss_dict.update({k + "_dqs": v.item()})
-
+            loss_dict.update({k + "_enc": v.item()})
+        # for k, v in dqs_losses.items():
+        #     loss_dict.update({k + "_debug": v})
         outputs = pred_dicts['outputs']
         dec_losses = self.compute_losses(outputs, targets, dn_meta)
         for k, v in dec_losses.items():
@@ -680,10 +858,10 @@ class SEEDHead(nn.Module):
                     loss_all += loss_contrastive_dec_li
                     loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
 
-        pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
-        loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d.to(torch.float32), gt_bboxes_3d_mask, None) # 前景预测损失
-        loss_all += loss_score
-        loss_dict.update({'loss_score': loss_score.item()})
+        # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
+        # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d.to(torch.float32), gt_bboxes_3d_mask, None) # 前景预测损失
+        # loss_all += loss_score
+        # loss_dict.update({'loss_score': loss_score.item()})
 
         return loss_all, loss_dict
 
@@ -702,11 +880,11 @@ class SEEDHead(nn.Module):
         if self.code_size > 7:
             targets[:, 7] = (bboxes[:, 7]) / (self.point_cloud_range[3] - self.point_cloud_range[0])
             targets[:, 8] = (bboxes[:, 8]) / (self.point_cloud_range[4] - self.point_cloud_range[1])
-
         return targets
 
     def decode_bbox(self, pred_boxes):
         z_normalizer = 10
+
         pred_boxes[..., 0] = pred_boxes[..., 0] * (self.point_cloud_range[3] - self.point_cloud_range[0]) + \
                              self.point_cloud_range[0]
         pred_boxes[..., 1] = pred_boxes[..., 1] * (self.point_cloud_range[4] - self.point_cloud_range[1]) + \
@@ -721,9 +899,9 @@ class SEEDHead(nn.Module):
             pred_boxes[:, 8] = (pred_boxes[:, 8]) * (self.point_cloud_range[4] - self.point_cloud_range[1])
         return pred_boxes
 
-    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_iou):
-        return [{"pred_logits": a, "pred_boxes": b, "pred_ious": c} for a, b, c in
-                zip(outputs_class, outputs_coord, outputs_iou)]
+    def _set_aux_loss(self, outputs_class, outputs_coord):
+        return [{"pred_logits": a, "pred_boxes": b} for a, b in
+                zip(outputs_class, outputs_coord)]
 
 
 class ClassificationLoss(nn.Module):
@@ -827,15 +1005,8 @@ class RegressionLoss(nn.Module):
                 1,
                 outputs["topk_indexes"].expand(-1, -1, outputs["pred_boxes"].shape[-1]),
             ) # （B, 1000, 7）
-            pred_ious = torch.gather(
-                outputs["pred_ious"],
-                1,
-                outputs["topk_indexes"].expand(-1, -1, outputs["pred_ious"].shape[-1]),
-            ) # （B, 1000, 1）
-
         else:
             pred_boxes = outputs["pred_boxes"] # （B, 1000, 7）如果是去噪gt （B, pad_size, 7）
-            pred_ious = outputs["pred_ious"] # （B, 1000, 1）
 
         target_boxes = torch.cat([t["gt_boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0) # 索引到最佳匹配的gt (n1+n2+..., 7) 也可能是去噪正样本（3*(n1-1) +  3*(n2-1), ....), ）
 
@@ -860,14 +1031,11 @@ class RegressionLoss(nn.Module):
             "loss_rad": loss_rad.sum() / num_boxes,
         }
 
-        pred_ious = pred_ious[idx] # （n_all, 1）
         box_preds = self.decode_func(torch.cat([src_boxes, src_rads], dim=-1)) # 反归一化
         box_target = self.decode_func(torch.cat([target_boxes, target_rads], dim=-1))
         iou_target = iou3d_nms_utils.paired_boxes_iou3d_gpu(box_preds, box_target) # (n_all, ) iou
         iou_target = iou_target * 2 - 1 # (0, 1) map 到 (-1, 1)
         iou_target = iou_target.detach()
-        loss_iou = F.l1_loss(pred_ious, iou_target.unsqueeze(-1), reduction="none")
-        losses.update({"loss_iou": loss_iou.sum() / num_boxes})
 
         return losses
 

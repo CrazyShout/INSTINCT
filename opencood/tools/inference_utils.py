@@ -175,6 +175,42 @@ def inference_intermediate_fusion(batch_data, model, dataset):
     return_dict = inference_early_fusion(batch_data, model, dataset)
     return return_dict
 
+def inference_no_fusion_simple(batch_data, model, dataset, single_gt=False, metric=None):
+    """
+    Model inference for no fusion.
+
+    Parameters
+    ----------
+    batch_data : dict
+    model : opencood.object
+    dataset : opencood.LateFusionDataset
+
+    Returns
+    -------
+    pred_box_tensor : torch.Tensor
+        The tensor of prediction bounding box after NMS.
+    gt_box_tensor : torch.Tensor
+        The tensor of gt bounding box.
+    single_gt : bool
+        if True, only use ego agent's label.
+        else, use all agent's merged labels.
+    """
+    output_dict_ego = OrderedDict()
+    if single_gt:
+        batch_data = {'ego': batch_data['ego']} # single的话就只看ego自己范围内的gt
+        
+    output_dict_ego['ego'] = model(batch_data['ego']) # 只输入ego的信息
+    # output_dict only contains ego
+    # but batch_data havs all cavs, because we need the gt box inside.
+
+    pred_box_tensor, pred_score, gt_box_tensor = \
+        dataset.post_process_no_fusion(batch_data,  # only for late fusion dataset
+                             output_dict_ego)
+
+    return_dict = {"pred_box_tensor" : pred_box_tensor, \
+                    "pred_score" : pred_score, \
+                    "gt_box_tensor" : gt_box_tensor}
+    return return_dict
 
 def save_prediction_gt(pred_tensor, gt_tensor, pcd, timestamp, save_path):
     """

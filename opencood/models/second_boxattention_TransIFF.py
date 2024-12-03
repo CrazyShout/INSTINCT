@@ -49,7 +49,7 @@ class ConQueRSecond(nn.Module):
         batch_dict = self.mean_vfe(batch_dict) # m 5 4 -> m 4
         batch_dict = self.backbone_3d(batch_dict) 
         batch_dict = self.height_compression(batch_dict)# 降维 压缩高度 得到4个样本，每个样本256特征维度 (256, 100, 252)
-        batch_dict = self.backbone_2d(batch_dict)# 会形成两个尺度的256 得到512
+        batch_dict = self.backbone_2d(batch_dict)# (B_N, 512, 100, 252)
         batch_dict = self.dense_head(batch_dict)
 
         if self.train_flag: # 之所以不用nn中的training来判断，实际上是因为loss和模型一起计算，解耦有点麻烦，且因为detr-based方法需要大量的loss，如果解耦反而要return大量的东西
