@@ -40,6 +40,7 @@ def getIntermediateFusionDataset(cls):
             # intermediate and supervise single
             self.supervise_single = True if ('supervise_single' in params['model']['args'] and params['model']['args']['supervise_single']) \
                                         else False
+            if self.supervise_single: print("====Supervise Single===")
             self.proj_first = False if 'proj_first' not in params['fusion']['args']\
                                          else params['fusion']['args']['proj_first']
 
@@ -54,8 +55,6 @@ def getIntermediateFusionDataset(cls):
                 self.stage1_result_path = params['box_align']['train_result'] if train else params['box_align']['val_result']
                 self.stage1_result = read_json(self.stage1_result_path)
                 self.box_align_args = params['box_align']['args']
-                
-
 
 
         def get_item_single_car(self, selected_cav_base, ego_cav_base):
@@ -118,7 +117,11 @@ def getIntermediateFusionDataset(cls):
                 selected_cav_processed.update({'processed_features': processed_lidar})
 
             # generate targets label single GT, note the reference pose is itself.
-            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center(
+            # FIXME 这里应该是有问题，对照Where2comm的官方代码确认，如果要在训练协同的时候监督单车，那按理说不应该使用协同标签，应该使用单车标签
+            # object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center(
+            #     [selected_cav_base], selected_cav_base['params']['lidar_pose']
+            # )
+            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center_single(
                 [selected_cav_base], selected_cav_base['params']['lidar_pose']
             )
             label_dict = self.post_processor.generate_label(

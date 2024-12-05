@@ -55,6 +55,7 @@ class DownsampleConv(nn.Module):
             x = self.layers[i](x)
         return x
 
+# below : added by xuyunjiang at 2024-5-12
 class GroupBatchnorm2d(nn.Module):
     def __init__(self, c_num: int,
                  group_num: int = 16,
