@@ -25,7 +25,7 @@ class MLP(nn.Module):
     
 class FeatureMagnet(nn.Module):
     def __init__(self, d_model=256, nhead=8,  dim_feedforward=1024, dropout=0.1, activation="relu"):
-        super.__init__()
+        super().__init__()
 
         self.query_fusion = MLP(d_model*2, d_model, d_model, 3)
 
@@ -38,23 +38,19 @@ class FeatureMagnet(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.activation = get_activation_fn(activation)
-
-    @staticmethod
-    def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
     
-    def forward(self, x, pos_1d, ego_idx=0):
+    def forward(self, x, pos_1d, ego_idx=0, ref_windows=None):
         '''
         x: [(1, L1, C), (1, L2, C)...] ego和其他agent的query, 这些query已经被CDA模块处理过了
-        pos_1d: [(1, L1, 1), (1, L2, 1)...] 标记了在统一坐标系下每个对应query的位置, 这个位置具有唯一性
-        ref_windows: [(1, L1, 7), (1, L2, 7)...] # 参考框, 用来BoxAttention
+        pos_1d: [(1, L1, 1), (1, L2, 1)...] 标记了在统一坐标系下每个对应query的位置, 这个位置具有唯一性 但是由于其他agent旋转后取整, 可能造成1d编码相同
+        ref_windows: [(1, L1, 7), (1, L2, 7)...]  # 参考框, 用来BoxAttention
         '''
         B_N = x[0].shape[0]  # Batch size
         final_queries = []  # To hold final queries
         
         # Process each agent and the ego agent separately
         ego_queries = x[ego_idx] # (1, L1, C)
-        ego_positions = pos_1d[ego_idx]
+        ego_positions = pos_1d[ego_idx] # (1, L1, 1)
         
         # Collect all other agents' queries and positions
         other_agents_queries = x[:ego_idx] + x[ego_idx+1:]
@@ -62,11 +58,11 @@ class FeatureMagnet(nn.Module):
         
         # 1. For the ego agent, we want to collect the queries based on position matching
         ego_position_queries = {}  # Dictionary to hold queries by position
-        for i in range(ego_queries.shape[1]):
+        for i in range(ego_queries.shape[1]): # 遍历每个向量
             pos = ego_positions[0, i].item()  # Get the position (assuming batch_size=1 for simplicity)
             if pos not in ego_position_queries:
                 ego_position_queries[pos] = []
-            ego_position_queries[pos].append(ego_queries[:, i, :]) # 将(1,C)放入
+            ego_position_queries[pos].append(ego_queries[:, i, :]) # pos和feature 是对应的，这里直接将(1,C)放入
         
         # 2. For each other agent, we process its queries based on the positions
         for agent_queries, agent_positions in zip(other_agents_queries, other_agents_positions):
@@ -75,22 +71,26 @@ class FeatureMagnet(nn.Module):
                 pos = agent_positions[0, i].item()  # Get the position
                 if pos not in agent_position_queries:
                     agent_position_queries[pos] = []
-                agent_position_queries[pos].append(agent_queries[:, i, :])
+                agent_position_queries[pos].append(agent_queries[:, i, :]) # 同一个位置的放入一个列表里，注意这里可能由于旋转造成位置重叠
             
             # 3. Fuse the agent's queries with the ego's queries at the same position
             for pos, agent_query_list in list(agent_position_queries.items()): # list创建副本 
                 if pos in ego_position_queries: # 如果在ego中也有重复的位置 
                     # Fuse the queries using MLP (aggregation of queries at the same position)
-                    ego_position_queries[pos] += agent_query_list
+                    sum_tensor = sum(agent_query_list) # 以防扭曲后的重叠投影，位置相同的就直接相加在一起 TODO 直接相加是否合理？如果用坐标网格来实现TransIFF？
+                    ego_position_queries[pos] += [sum_tensor] # [(1,C), (1,C)]
 
                     agent_position_queries.pop(pos)
 
                     # agent_queries_fused = torch.cat(agent_query_list, dim=1)  # Concatenate queries for the same position
-                    ego_queries_fused = torch.cat(ego_position_queries[pos], dim=1)  # Concatenate ego queries for the same position (1, C*2) O为重叠的个数
+                    ego_queries_fused = torch.cat(ego_position_queries[pos], dim=1)  # Concatenate ego queries for the same position (1, C*2)
                     # Perform fusion
                     fused_queries = self.query_fusion(ego_queries_fused)  # MLP fusion (1, C)
                     # Update the ego's query with the fused result
                     ego_position_queries[pos] = [fused_queries]  # Update with the fused queries
+                else: # 如果没有重叠也要保证所有投影后的位置唯一，重叠的query就相加在一起
+                    sum_tensor = sum(agent_query_list)
+                    agent_position_queries[pos] = [sum_tensor]
         
         # Now combine the final queries for ego and other agents 重新恢复成 (1, l1, C)
         final_ego_queries = torch.cat([val[0] for val in ego_position_queries.values()], dim=0).unsqueeze(0)  # Concatenate all position-based fused queries
@@ -101,10 +101,12 @@ class FeatureMagnet(nn.Module):
 
         # Stack all the final queries together
         final_queries = torch.cat(final_queries, dim=1)  # Concatenate queries from ego and agents (1, l1+l2', C) 这个也就是paper中提到的 optimal Q
+        # print("final_queries shape is ", final_queries.shape)
 
         k = v =  torch.cat(x, dim=1) # 原始的 所有agent 筛选的query feature 全部concat 在一起，形成(1, l1+l2, C)
+        # print("k shape is ", k.shape)
 
-        outputs = self.self_attn(final_queries, k, v)
+        outputs = self.self_attn(final_queries, k, v)[0]
         final_queries = final_queries + self.dropout(outputs)
         final_queries = self.norm1(final_queries)
         outputs = self.linear2(self.dropout(self.activation(self.linear1(final_queries))))
@@ -116,7 +118,7 @@ class FeatureMagnet(nn.Module):
 
 class CrossDomainAdaption(nn.Module):
     def __init__(self, d_model=256, nhead=8,  dim_feedforward=1024, dropout=0.1, activation="relu"):
-        super.__init__()
+        super().__init__()
         self.self_attn_ego = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.self_attn_inf = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.ego_linear1 = nn.Linear(d_model, dim_feedforward)
@@ -193,8 +195,8 @@ class TransIFFEncoder(nn.Module):
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
-        decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
-        self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers)
+        # decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
+        # self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers)
 
     def _generate_relative_position_encoding(self, H, W):
         # 创建一个网格，其中每个位置的 (i, j) 坐标
@@ -240,11 +242,11 @@ class TransIFFEncoder(nn.Module):
                 torch.linspace(0.5, H - 0.5, H, dtype=torch.float32, device=device),
                 torch.linspace(0.5, W - 0.5, W, dtype=torch.float32, device=device),
                 indexing="ij",
-            )
+            ) # 两个shape 都是(H,W)
 
             ref_y = ref_y.reshape(-1)[None] / H
             ref_x = ref_x.reshape(-1)[None] / W
-            ref_xy = torch.stack((ref_x, ref_y), -1)
+            ref_xy = torch.stack((ref_x, ref_y), -1) # (HW,2)
             ref_wh = torch.ones_like(ref_xy) * 0.025  # 0.01 - 0.05 w.r.t. Deform-DETR
             placeholder = torch.zeros_like(ref_xy)[..., :1]
             ref_box = torch.cat((ref_xy, placeholder + 0.5, ref_wh, placeholder + 0.5, placeholder), -1).expand(
@@ -303,8 +305,11 @@ class TransIFFEncoder(nn.Module):
         src_start_index = torch.cat([src_shape.new_zeros(1), src_shape.prod(1).cumsum(0)[:-1]]) # 这个是用于一次处理多个尺度的feature的，在我们这里就是(0,)
 
         memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors) # (B, H*W, 256) 通过BoxAttention进行了交互
-        query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors)# 返回None，None，(B, 1000, 10)，(B, 1000, 1)
+        query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors)# 返回None，None，(B, query_num, 8)，(B, query_num, 1)
 
+        select_memory = torch.gather(memory, 1, topk_indexes.expand(-1, -1, memory.shape[-1])) # (B, query_num, 256)
+
+        return select_memory, topk_proposals, None, memory, src_anchors, topk_indexes
         if noised_gt_box is not None:
             noised_gt_proposals = torch.cat(
                 (

@@ -9,13 +9,13 @@ from opencood.models.sub_modules.mean_vfe import MeanVFE
 from opencood.models.sub_modules.sparse_backbone_3d import VoxelBackBone8x
 from opencood.models.sub_modules.height_compression import HeightCompression
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
-from opencood.models.comm_modules.ConQueR_head import ConQueRHead
+from opencood.models.comm_modules.TransIFF_head import TransIFFRHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
 
-class ConQueRSecond(nn.Module):
+class SecondBoxAttentionTransIFF(nn.Module):
     def __init__(self, args):
-        super(ConQueRSecond, self).__init__()
+        super(SecondBoxAttentionTransIFF, self).__init__()
 
         # mean_vfe
         self.mean_vfe = MeanVFE(args['vfe'], 4)
@@ -30,7 +30,7 @@ class ConQueRSecond(nn.Module):
         self.train_flag = args.get("train_flag", True)
         
         # dense_head
-        self.dense_head = ConQueRHead(model_cfg=args['dense_head'], input_channels=args['dense_head']['input_features'], num_class=1, class_names=['vehicle'], grid_size=args['grid_size'],
+        self.dense_head = TransIFFRHead(model_cfg=args['dense_head'], input_channels=args['dense_head']['input_features'], num_class=1, class_names=['vehicle'], grid_size=args['grid_size'],
                                    point_cloud_range=args['lidar_range'], predict_boxes_when_training=False, voxel_size=args['voxel_size'], train_flag=self.train_flag)
 
     def forward(self, data_dict):
@@ -38,12 +38,20 @@ class ConQueRSecond(nn.Module):
         voxel_features = data_dict['processed_lidar']['voxel_features']# m 5 4
         voxel_coords = data_dict['processed_lidar']['voxel_coords'] # m 4
         voxel_num_points = data_dict['processed_lidar']['voxel_num_points'] # m 
+        record_len = data_dict['record_len']
         batch_size = voxel_coords[:,0].max() + 1 # batch size is padded in the first idx
+
+        pairwise_t_matrix = data_dict['pairwise_t_matrix']
+        
         batch_dict = {'voxel_features': voxel_features,
                       'voxel_coords': voxel_coords,
                       'voxel_num_points': voxel_num_points,
                       'object_bbx_center': data_dict['object_bbx_center'], # (B, max_num, 7)
-                      'object_bbx_mask': data_dict['object_bbx_mask'],                      
+                      'object_bbx_mask': data_dict['object_bbx_mask'],
+                      'object_bbx_center_single': data_dict['object_bbx_center_single'], # (B, max_num, 7)
+                      'object_bbx_mask_single': data_dict['object_bbx_mask_single'],
+                      'record_len': record_len,
+                      'pairwise_t_matrix': pairwise_t_matrix,
                       'batch_size': batch_size}
 
         batch_dict = self.mean_vfe(batch_dict) # m 5 4 -> m 4

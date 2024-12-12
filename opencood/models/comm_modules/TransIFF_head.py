@@ -6,13 +6,14 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
+from collections import defaultdict
 
 from opencood.pcdet_utils.roiaware_pool3d import roiaware_pool3d_utils
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
 from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
-from opencood.models.sub_modules.TrasIFF_transformer import Transformer, MLP, get_clones, TransIFFEncoder, CrossDomainAdaption
+from opencood.models.sub_modules.TrasIFF_transformer import Transformer, MLP, get_clones, TransIFFEncoder, CrossDomainAdaption, FeatureMagnet
 
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -42,38 +43,46 @@ class PositionEmbeddingSine_w_Trans(nn.Module):
         return split_x
 
     def transform_position_matrix(self, position_matrix, transform_matrix):
-        # position_matrix 是 B x H x W x 2 的相对位置矩阵
-        # transform_matrix 是 B x 3 x 3 的变换矩阵
-        
         B, H, W, _ = position_matrix.shape
-        transformed_positions = torch.zeros_like(position_matrix)
-        
-        # 对每个批次进行处理
-        for b in range(B):
-            # 获取当前批次的变换矩阵
-            transform = transform_matrix[b]
-            
-            # 对每个位置进行变换
-            for i in range(H):
-                for j in range(W):
-                    # 获取当前位置的相对坐标 (x, y)
-                    x, y = position_matrix[b, i, j]
-                    
-                    # 将 (x, y) 转换为齐次坐标 (x, y, 1)
-                    original_coords = torch.tensor([x, y, 1.0])  # 齐次坐标
-                    
-                    # 应用变换矩阵
-                    transformed_coords = torch.matmul(transform, original_coords.float())
-
-                    # 获取变换后的坐标（不再需要齐次坐标）
-                    transformed_position = transformed_coords[:2]  # 只取 x, y
-
-                     # 四舍五入
-                    transformed_position = torch.round(transformed_position)
-                    
-                    transformed_positions[b, i, j] = transformed_position
-        
+        homogeneous_coords = torch.cat([position_matrix, torch.ones(B, H, W, 1, device=position_matrix.device)], dim=-1)  # (B, H, W, 3)
+        transform_matrix = transform_matrix[:, None, None, :, :].expand(-1, H, W, -1, -1)  # (B, H, W, 3, 3)
+        transformed_coords = torch.matmul(transform_matrix.float(), homogeneous_coords.unsqueeze(-1).float())  # (B, H, W, 3, 1)
+        transformed_positions = transformed_coords[..., :2, 0]  # (B, H, W, 2)
+        transformed_positions = torch.round(transformed_positions)  # 保留整型坐标
         return transformed_positions
+
+    # def transform_position_matrix(self, position_matrix, transform_matrix):
+    #     # position_matrix 是 B x H x W x 2 的相对位置矩阵
+    #     # transform_matrix 是 B x 3 x 3 的变换矩阵
+        
+    #     B, H, W, _ = position_matrix.shape
+    #     transformed_positions = position_matrix.new_zeros(list(position_matrix.shape))
+        
+    #     # 对每个批次进行处理
+    #     for b in range(B):
+    #         # 获取当前批次的变换矩阵
+    #         transform = transform_matrix[b]
+    #         # 对每个位置进行变换
+    #         for i in range(H):
+    #             for j in range(W):
+    #                 # 获取当前位置的相对坐标 (x, y)
+    #                 x, y = position_matrix[b, i, j]
+                    
+    #                 # 将 (x, y) 转换为齐次坐标 (x, y, 1)
+    #                 original_coords = torch.tensor([x, y, 1.0], device=position_matrix.device)  # 齐次坐标
+                    
+    #                 # 应用变换矩阵
+    #                 transformed_coords = torch.matmul(transform.float(), original_coords.float())
+
+    #                 # 获取变换后的坐标（不再需要齐次坐标）
+    #                 transformed_position = transformed_coords[:2]  # 只取 x, y
+
+    #                  # 四舍五入
+    #                 transformed_position = torch.round(transformed_position)
+                    
+    #                 transformed_positions[b, i, j] = transformed_position
+        
+    #     return transformed_positions
     
     def forward(self, x, mask=None, pairwise_t_matrix=None, record_len=None):
         '''
@@ -108,8 +117,15 @@ class PositionEmbeddingSine_w_Trans(nn.Module):
             b_pos_list = []
             for b in range(B):
                 N = record_len[b]
-                t_matrix = pairwise_t_matrix[b][:N, 0, :, :] # (2, 3，3) 每个agent到ego的变换矩阵
+                t_matrix = pairwise_t_matrix[b][:N, 0, :, :] # (2, 3，3) ego到每个agent的变换矩阵
                 b_pos = batch_pos[b] # (2, H, W, 2)
+                # print("in pos, record_len is ", record_len)
+                # print("in pos, batch_pos len  is ", len(batch_pos))
+                # print("in pos, N is ", N)
+                # print("in pos, b_pos.shape is ", b_pos.shape)
+                # print("in pos, t_matrix.shape is ", t_matrix.shape)
+                # print("in pos, position_encoding.shape is ", position_encoding.shape)
+                # print("in pos, x.shape is ", x.shape)
                 assert t_matrix.shape[0] == b_pos.shape[0]
                 b_pos_trans = self.transform_position_matrix(b_pos, t_matrix) # 相对位置编码进行了坐标变换
                 b_pos_list.append(b_pos_trans)
@@ -134,7 +150,7 @@ class PositionEmbeddingSine_w_Trans(nn.Module):
         pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
 
-        return pos, one_d_position_encoding.squeeze(-1)
+        return pos, one_d_position_encoding.unsqueeze(-1)
 
 class PositionEmbeddingSine(nn.Module):
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
@@ -178,6 +194,27 @@ class PositionEmbeddingSine(nn.Module):
         return pos
 
 
+class Det3DHeadNoAnchor(nn.Module):
+    def __init__(self, hidden_dim, num_classes=1, code_size=7, num_layers=1):
+        super().__init__()
+        class_embed = MLP(hidden_dim, hidden_dim, num_classes, 3) # (B, L, 1)
+        bbox_embed = MLP(hidden_dim, hidden_dim, code_size, 3) # (B, L, 7)
+
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        class_embed.layers[-1].bias.data = torch.ones(num_classes) * bias_value # 最后一个线性层的偏置进行初始化
+        nn.init.constant_(bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(bbox_embed.layers[-1].bias.data, 0)
+
+        self.class_embed = get_clones(class_embed, num_layers)
+        self.bbox_embed = get_clones(bbox_embed, num_layers)
+
+    def forward(self, embed, layer_idx=0):
+        cls_logits = self.class_embed[layer_idx](embed)
+        box_coords = self.bbox_embed[layer_idx](embed).sigmoid() # 这里类似锚框的机制，逆转回实数空间加上预测的偏移，最后重新归一化
+
+        return cls_logits, box_coords
+
 class Det3DHead(nn.Module):
     def __init__(self, hidden_dim, num_classes=1, code_size=7, num_layers=1):
         super().__init__()
@@ -199,13 +236,8 @@ class Det3DHead(nn.Module):
         # self.iou_embed = get_clones(iou_embed, num_layers)
 
     def forward(self, embed, anchors, layer_idx=0):
-        # print("embed shape is", embed.shape)
-        # print("anchors shape is", anchors.shape)
-        # print("anchors  is", anchors)
-
         cls_logits = self.class_embed[layer_idx](embed)
         box_coords = (self.bbox_embed[layer_idx](embed) + inverse_sigmoid(anchors)).sigmoid() # 这里类似锚框的机制，逆转回实数空间加上预测的偏移，最后重新归一化
-        # print("box_coords is", box_coords)
 
         # pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
         return cls_logits, box_coords
@@ -249,8 +281,8 @@ class TransIFFRHead(nn.Module):
         super(TransIFFRHead, self).__init__()
 
         self.grid_size = grid_size # [2016, 800, 50]
-        self.point_cloud_range = point_cloud_range # [-75.2, -75.2, -2, 75.2, 75.2, 4]
-        self.voxel_size = voxel_size # [0.1, 0.1, 0.15]
+        self.point_cloud_range = point_cloud_range # [-100.8, -40, -3.5, 100.8, 40, 1.5]
+        self.voxel_size = voxel_size # [0.1, 0.1, 0.1]
         self.feature_map_stride = model_cfg['feature_map_stride'] # 8
         self.num_classes = num_class # 1
 
@@ -284,7 +316,7 @@ class TransIFFRHead(nn.Module):
         )
 
         self.pos_embed = PositionEmbeddingSine(self.hidden_channel // 2)
-        self.pos_embed_w_trans = PositionEmbeddingSine_w_Trans(self.hidden_channel // 2)
+        self.pos_embed_w_trans = PositionEmbeddingSine_w_Trans(self.hidden_channel // 2, voxel_size=self.voxel_size, feature_map_stride=self.feature_map_stride)
 
         for module in self.input_proj.modules():
             if isinstance(module, nn.Conv2d):
@@ -314,32 +346,53 @@ class TransIFFRHead(nn.Module):
             dropout=dropout, 
             activation=activation)
 
-        self.transformer = Transformer(
-            d_model=self.hidden_channel, # 256
-            nhead=num_heads, # 8
-            nlevel=1,
-            num_encoder_layers=num_decoder_layers, # 6
-            num_decoder_layers=num_decoder_layers, # 6
+        self.feature_magnet = FeatureMagnet(
+            d_model=self.hidden_channel, 
+            nhead=num_heads, 
             dim_feedforward=ffn_channel, # 1024
-            dropout=dropout, # 0.0
-            activation=activation, # gelu
-            num_queries=self.num_queries, # 1000
-            num_classes=num_class, # 3
-            cp_flag=cp_flag # True
-        )
-
-        self.transformer.proposal_head = Det3DHead(
+            dropout=dropout, 
+            activation=activation)
+        
+        self.encoder.proposal_head = Det3DHead(
             self.hidden_channel,
             code_size=self.code_size,
             num_classes=num_class,
             num_layers=1,
         )
-        self.transformer.decoder.detection_head = Det3DHead(
+
+        self.detection_head = Det3DHeadNoAnchor(
             self.hidden_channel,
             code_size=self.code_size,
             num_classes=num_class,
-            num_layers=num_decoder_layers,
+            num_layers=1,
         )
+
+        # self.transformer = Transformer(
+        #     d_model=self.hidden_channel, # 256
+        #     nhead=num_heads, # 8
+        #     nlevel=1,
+        #     num_encoder_layers=num_decoder_layers, # 6
+        #     num_decoder_layers=num_decoder_layers, # 6
+        #     dim_feedforward=ffn_channel, # 1024
+        #     dropout=dropout, # 0.0
+        #     activation=activation, # gelu
+        #     num_queries=self.num_queries, # 1000
+        #     num_classes=num_class, # 3
+        #     cp_flag=cp_flag # True
+        # )
+
+        # self.transformer.proposal_head = Det3DHead(
+        #     self.hidden_channel,
+        #     code_size=self.code_size,
+        #     num_classes=num_class,
+        #     num_layers=1,
+        # )
+        # self.transformer.decoder.detection_head = Det3DHead(
+        #     self.hidden_channel,
+        #     code_size=self.code_size,
+        #     num_classes=num_class,
+        #     num_layers=num_decoder_layers,
+        # )
 
         if self.train_flag and self.dn['enabled']:
             contras_dim = self.model_cfg['contrastive']['dim'] # 256
@@ -402,18 +455,11 @@ class TransIFFRHead(nn.Module):
         return split_x
     
     def predict(self, batch_dict):
-        batch_size = batch_dict['batch_size']
         spatial_features_2d = batch_dict['spatial_features_2d'] # B_N, 512, H, W
         record_len = batch_dict['record_len'] # 举个例子，batch size == 4时，形如List[2, 2, 2, 2]，表示每个场景样本下的agent数目为2，即一车一路
+        batch_size = len(record_len)
         pairwise_t_matrix = batch_dict['pairwise_t_matrix'] # (B_N, L, L, 4, 4)
         Bn, C, H, W = spatial_features_2d.shape # Bn = 2*B 因为每个场景下都有2个agent
-
-        # (B,L,L,2,3)
-        # pairwise_t_matrix = pairwise_t_matrix[:,:,:,[0, 1],:][:,:,:,:,[0, 1, 3]] # [B, L, L, 2, 3]
-        # pairwise_t_matrix[...,0,1] = pairwise_t_matrix[...,0,1] * H / W
-        # pairwise_t_matrix[...,1,0] = pairwise_t_matrix[...,1,0] * W / H
-        # pairwise_t_matrix[...,0,2] = pairwise_t_matrix[...,0,2] / (self.downsample_rate * self.discrete_ratio * W) * 2
-        # pairwise_t_matrix[...,1,2] = pairwise_t_matrix[...,1,2] / (self.downsample_rate * self.discrete_ratio * H) * 2
 
         features = []
         pos_encodings = []
@@ -431,165 +477,80 @@ class TransIFFRHead(nn.Module):
 
         '''
         hidden_state: (B, query_num, 256) 这是encoder的输出
-        init_reference: (B,  query_num, 8) encoder筛选出来的参考框
-        inter_references: (6, B, pad_size + 1000 + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
-        src_embed: (B, H*W, 256) 粗查询, 经过了一层DGA layer后scatter回去
+        init_reference: (B, query_num, 8) encoder筛选出来的参考框
+        inter_references: 这一项为None,  (6, B, pad_size + 1000 + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是decoder每一层的预测结果
+        src_embed: (B, H*W, 256) 粗查询, 经过了一层encoder后scatter回去
         src_ref_windows: (B, H * W, 7) 参考框，类似于锚框
         src_indexes: (B, query_num, 1) query_num 个fined query 索引
         '''
         hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
 
         # 单车部分已经准备好了query，接下来要准备变换后的相对位置编码以及进行filter高置信度的
-        pos_w_trans, pos_w_trans_1d = self.pos_embed_w_trans(spatial_features_2d) # (B_N, 256, H, W) 和 1D 相对位置编码 (B_N, H, W, 1) 用来做Feature Magnet 
-        pos_w_trans.view(pos_w_trans.shape[0], pos_w_trans.shape[1], -1).transpose(1,2) # (B_N,  HW, 256)
-        pos_w_trans_1d.view(pos_w_trans_1d.shape[0], -1, 1) # (B_N,  HW, 1)
+        pos_w_trans, pos_w_trans_1d = self.pos_embed_w_trans(spatial_features_2d, pairwise_t_matrix=pairwise_t_matrix, record_len=record_len) # (B_N, 256, H, W) 和 1D 相对位置编码 (B_N, H, W, 1) 用来做Feature Magnet 
+        pos_w_trans = pos_w_trans.view(pos_w_trans.shape[0], pos_w_trans.shape[1], -1).transpose(1,2) # (B_N,  HW, 256)
+        pos_w_trans_1d = pos_w_trans_1d.view(pos_w_trans_1d.shape[0], -1, 1) # (B_N,  HW, 1)
 
         pos_w_trans = torch.gather(pos_w_trans, 1, src_indexes.expand(-1, -1, pos_w_trans.shape[-1])) # (B_N,  query_num, 256)
         pos_w_trans_1d = torch.gather(pos_w_trans_1d, 1, src_indexes.expand(-1, -1, pos_w_trans_1d.shape[-1])) # (B_N,  query_num, 1)
 
         ref_w, probs = init_reference[...,:7], init_reference[...,7:] # (B_N,  query_num, 7), (B_N,  query_num, 1)
-        filter_num = math.ceil(self.num_queries * 0.1) # 保留10%的数量 这一点复现的时候和TransIFF不一样，TransIFF是用分数过滤，但是我们不这样做
-        select_probs_mask, indices = torch.topk(probs, k=filter_num, dim=-1) # 选出来的是(B_N,  query_num * 0.1, 1) 
-        ref_w = torch.gather(ref_w, 1, indices.expand(-1, -1, ref_w.shape[-1])) # (B_N,  query_num * 0.1, 7)
-        
+        filter_num = math.ceil(self.num_queries * 0.1) # 保留10%的数量 这一点复现的时候和TransIFF不一样，TransIFF是用置信度过滤，但是为方便处理，我们不这样做
+        select_probs_mask, indices = torch.topk(probs, k=filter_num, dim=1) # 选出来的是(B_N,  query_num * 0.1, 1) 
+
+        select_ref_w = torch.gather(ref_w, 1, indices.expand(-1, -1, ref_w.shape[-1])) # (B_N,  query_num * 0.1, 7)     
         select_pos_w_trans = torch.gather(pos_w_trans, 1, indices.expand(-1, -1, pos_w_trans.shape[-1])) # (B_N,  query_num * 0.1, 256)
         select_pos_w_trans_1d = torch.gather(pos_w_trans_1d, 1, indices.expand(-1, -1, pos_w_trans_1d.shape[-1])) # (B_N,  query_num * 0.1, 1) 1D位置编码
         select_hidden_state = torch.gather(hidden_state, 1, indices.expand(-1, -1, hidden_state.shape[-1])) # (B_N,  query_num * 0.1, 256)
         select_hidden_state_batch = self.regroup(select_hidden_state, record_len)
         select_pos_w_trans_batch = self.regroup(select_pos_w_trans, record_len)
         select_pos_w_trans_1d_batch = self.regroup(select_pos_w_trans_1d, record_len)
-        for b in range(Bn):
+        select_ref_w_batch = self.regroup(select_ref_w, record_len)
+        
+        # 平移部分要标准化 这个操作是为了将其他agent的ref windows给转换到ego的坐标系下。TODO 思索一下有必要变换吗？暂时没有用到，是直接
+        pairwise_t_matrix[...,0,3] = pairwise_t_matrix[...,0,3] / (self.downsample_rate * self.discrete_ratio * W) * 2
+        pairwise_t_matrix[...,1,3] = pairwise_t_matrix[...,1,3] / (self.downsample_rate * self.discrete_ratio * H) * 2
+        pairwise_t_matrix[...,2,3] = 0
+        
+        outputs = []
+        
+        for b in range(batch_size):
+            b_res = {}
             b_hidden_state = select_hidden_state_batch[b] # (N, query_num * 0.1, 256)
             b_pos_w_trans = select_pos_w_trans_batch[b] # (N, query_num * 0.1, 256)
             b_pos_w_trans_1d = select_pos_w_trans_1d_batch[b] # (N, query_num * 0.1, 1)
-            N = len(b_hidden_state.shape[0])
+            b_ref_w = select_ref_w_batch[b] # (N, query_num * 0.1, 7)
+            t_matrix = pairwise_t_matrix[b] # (L, L, 4, 4)
+            N = b_hidden_state.shape[0]
             feat_list = []
             pos_list = []
+            pos1d_list = []
             for i in range(N):
                 feat_list.append(b_hidden_state[i:i+1])
                 pos_list.append(b_pos_w_trans[i:i+1])
+                pos1d_list.append(b_pos_w_trans_1d[i:i+1])
+            # CDA使用统一的位置编码来进行特征交互
             feat_res_lst = self.cross_domain_attention(feat_list, pos_list) # [(1, l1, C), (1, l2, C)] 
-
-        
-
-
-
-
-        # score_mask = self.mask_predictor(features[0]) # B, H, W
-
-        dn = self.dn
-        if self.train_flag and dn['enabled'] and dn['dn_number'] > 0:
-            gt_boxes = batch_dict['object_bbx_center'] # B, maxnum, 7
-            gt_boxes_mask = batch_dict['object_bbx_mask'] # B, maxnum
-
-            targets = list() # 列表存放每个样本的标签
-            for batch_idx in range(batch_size):
-                target = {}
-                gt_bboxes = gt_boxes[batch_idx] # (maxnum, 7)
-                gt_bboxes_mask = gt_boxes_mask[batch_idx] # (maxnum, )
-                valid_box = gt_bboxes[gt_bboxes_mask.bool()] # （n_idx, 7）
-                gt_labels = torch.ones(valid_box.size(0), device=valid_box.device, dtype=valid_box.dtype)
-                target['gt_boxes'] = self.encode_bbox(valid_box) # 给gt box做好归一化工作
-                target['labels'] = gt_labels.long() - 1 # (n_idx, )
-                targets.append(target)
-
-            '''
-            若targets中每个样本的gt objet 个数为 n1, n2 其中 n2 最大 记作 max_gt_num
-            input_query_label: (B, pad_size, num_classes) num_classes=1 其实这项没什么意义 TODO delete
-            input_query_bbox: (B, pad_size, 7)
-            attn_mask: (1000+pad_size, 1000+pad_size)
-            dn_meta: {'pad_size': 2 * max_gt_num * 3, 'num_dn_group': 3}
-            其中2 * max_gt_num * 3 = pad_size, n1 n2是batchsize=2时的假设, n2>n1, 这个乘法式表示有三组噪声，每组分正负样本，正样本做重建，负样本要学会剔除
-            '''
-            input_query_label, input_query_bbox, attn_mask, dn_meta = prepare_for_cdn(
-                dn_args=(targets, dn['dn_number'],dn['dn_label_noise_ratio'], dn['dn_box_noise_scale']),
-                training=self.train_flag,
-                num_queries=self.num_queries,
-                num_classes=self.num_classes,
-                hidden_dim=self.hidden_channel,
-                label_enc=None,
-                code_size=self.code_size,
-            ) # 这一步准备噪声样本
-        else:
-            input_query_bbox = input_query_label = attn_mask = dn_meta = None
-            targets = None
-
-        outputs = self.transformer(
-            features, # [(B, 256, H, W)]
-            pos_encodings, # [(B, 256, H, W)]
-            input_query_bbox, # (B, pad_size, 7)
-            input_query_label, # (B, pad_size, num_classes) num_classes=1
-            attn_mask, # (1000+pad_size, 1000+pad_size)
-            targets=targets, # [Sample1:Dict, Sample2:Dict...]
-        )
-        '''
-        hidden_state: (6, B, pad_size + 1000 + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是6层decoder的输出
-        init_reference: (B, pad_size + 1000 + 4*max_gt_num, 7) 6批噪声gt+初始的dqs得到的1000个box 加上 4批 gt, 第一批是gt,后面3批示噪声gt正样本
-        inter_references: (6, B, pad_size + 1000 + 4*max_gt_num, 10) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
-        src_embed: (B, H*W, 256) 粗查询, 经过了一层DGA layer后scatter回去
-        src_ref_windows: (B, H * W, 7) 参考框，类似于锚框
-        src_indexes: (B, 1000, 1) 1000个fined dqs query 索引
-        '''
-        hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
-
-        # decoder
-        outputs_classes = []
-        outputs_coords = []
-        for idx in range(hidden_state.shape[0]): # 这里是遍历6层
-            if idx == 0:
-                reference = init_reference
-            else:
-                reference = inter_references[idx - 1]
-            outputs_class, outputs_coord = self.transformer.decoder.detection_head(hidden_state[idx], # 每一层明明已经产出过对应的结果了，为什么有又进行一遍输出头？答：对比学习的辅助输出参数不同步，这里应该是这个考虑？
-                                                                                                reference, idx) # 根据每一层的query特征，和reference重新来一次输出头，但是与之前不一样的是，这次会带上GT以及GT噪声正样本， 这部分来自于对比学习
-            outputs_classes.append(outputs_class)
-            outputs_coords.append(outputs_coord)
-        outputs_class = torch.stack(outputs_classes) # (6, B, pad_size + 1000 + 4*max_gt_num, 1)
-        outputs_coord = torch.stack(outputs_coords) # (6, B, pad_size + 1000 + 4*max_gt_num, 7)
-
-        # dn post process
-        '''
-        去噪组分开
-        outputs_class:  (6, B, 1000 + 4*max_gt_num, 1)
-        outputs_coord:  (6, B, 1000 + 4*max_gt_num, 7)
-        dn_meta = {
-            "pad_size":                 2 * max_gt_num * 3
-            "num_dn_group":             3
-            "output_known_lbs_bboxes":  {
-                "pred_logits":  (B, pad_size, 1) 最后一层的预测结果 这个是噪声样本
-                "pred_boxes":   (B, pad_size, 7) 
-                "aux_outputs":  List[Dict{"pred_logits": (B, pad_size, 3), "pred_boxes": (B, pad_size, 7), ...] 五个，表示每一层的噪声样本                 
+            feat_res = self.feature_magnet(feat_res_lst, pos1d_list, ego_idx=0) # (1, L, C)  到这里后就要开始准备输出吗？如果按照boxAttention，这就没有对ref进行多次校准
+            # print("feat_res shape is ", feat_res.shape)
+            # print("feat_res is ", feat_res)
+            cls_logits, box_coords = self.detection_head(feat_res) # (1, L, 1), (1, L, 7)
+            b_res = {
+                'pred_logits': cls_logits,
+                'pred_boxes': box_coords
             }
-        }
-        '''
-        if dn['dn_number'] > 0 and dn_meta is not None:
-            outputs_class, outputs_coord = dn_post_process(
-                outputs_class,
-                outputs_coord,
-                dn_meta,
-                self.aux_loss, # 使用辅助损失
-                self._set_aux_loss,
-            )
+            # print("b_res is ", b_res)
+            outputs.append(b_res)
 
         # only for supervision
         enc_outputs = None
-        if self.train_flag: # 防止梯度流被污染，DQS只是辅助筛选query，筛选时不能参与梯度计算，否则训练早期低质量的query会大幅度影响结果，因此在DQS中必须要detach
-            enc_class, enc_coords = self.transformer.proposal_head(src_embed, src_ref_windows) # 这个之前是dqs打分用的，这里输入的是和当时一样的输入，即获得当时的打分结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
+        if self.train_flag: # 防止梯度流被污染，encoder只是辅助筛选query，筛选时不能参与梯度计算，否则训练早期低质量的query会大幅度影响结果
+            enc_class, enc_coords = self.encoder.proposal_head(src_embed, src_ref_windows) # 所有query全部走head输出一遍
             enc_outputs = {
-                'topk_indexes': src_indexes,    # (B, 1000, 1) # 通过dqs挑选的1000个query的索引
+                'topk_indexes': src_indexes,    # (B, query_num, 1) # 通过dqs挑选的1000个query的索引
                 'pred_logits': enc_class,       # (B, H*W, 1)
                 'pred_boxes': enc_coords,       # (B, H*W, 7)
             }
-
-        # compute decoder losses
-        outputs = {
-            # "pred_scores_mask": score_mask, # (B, H, W)
-            "pred_logits": outputs_class[-1][:, : self.num_queries],    # (B, 1000, 1) # 最后一层
-            "pred_boxes": outputs_coord[-1][:, : self.num_queries],     # (B, 1000, 7)
-            "aux_outputs": self._set_aux_loss(
-                outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
-            ),
-        }
+        
         if self.train_flag:
             '''
             pred_dicts:         {"enc_outputs":  Dict()
@@ -599,7 +560,7 @@ class TransIFFRHead(nn.Module):
             dn_meta:            Dict() 去噪数据
             '''
             pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
-            return pred_dicts, outputs_class, outputs_coord, dn_meta
+            return pred_dicts, None, None, None
         else:
             pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
             return pred_dicts
@@ -614,12 +575,17 @@ class TransIFFRHead(nn.Module):
             bboxes = self.get_bboxes(pred_dicts)
             batch_dict['final_box_dicts'] = bboxes
         else:
+            gt_bboxes_3d_single = batch_dict['object_bbx_center_single'] # (B_n, maxnum, 7)
+            gt_bboxes_3d_mask_single = batch_dict['object_bbx_mask_single'] # (B_n, maxnum)
+            gt_labels_3d_single = gt_bboxes_3d_single.new_ones(gt_bboxes_3d_mask_single.size(0), gt_bboxes_3d_mask_single.size(1))
+            gt_labels_3d_single = gt_labels_3d_single.long() - 1 # (B_n, maxnum)
+
             gt_bboxes_3d = batch_dict['object_bbx_center'] # (B, maxnum, 7)
             gt_bboxes_3d_mask = batch_dict['object_bbx_mask'] # (B, maxnum)
             gt_labels_3d = gt_bboxes_3d.new_ones(gt_bboxes_3d_mask.size(0), gt_bboxes_3d_mask.size(1))
             gt_labels_3d = gt_labels_3d.long() - 1 # (B, maxnum)
 
-            loss, tb_dict = self.loss(gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta, outputs_class, outputs_coord)
+            loss, tb_dict = self.loss(gt_bboxes_3d_single, gt_bboxes_3d_mask_single, gt_labels_3d_single, gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta, outputs_class, outputs_coord)
             batch_dict['loss'] = loss
             batch_dict['tb_dict'] = tb_dict
         return batch_dict
@@ -736,60 +702,31 @@ class TransIFFRHead(nn.Module):
         weight_dict = self.losses.weight_dict
         for k, v in loss_dict.items():
             if k in weight_dict:
+                # print(f"Shape mismatch: v.shape = {v.shape}, weight_dict[k] = {weight_dict[k]}")
                 loss_dict[k] = v * weight_dict[k]
 
         return loss_dict
-
-    def compute_score_losses(self, pred_scores_mask, gt_bboxes_3d, gt_bboxes_3d_mask, foreground_mask):
-        '''
-        pred_scores_mask: 前景预测, (B, H, W)
-        gt_bboxes_3d: (B, max_num, 7)
-        '''
-        gt_bboxes_3d = copy.deepcopy(gt_bboxes_3d)
-        grid_size = torch.ceil(torch.from_numpy(self.grid_size).to(gt_bboxes_3d) / self.feature_map_stride) # 空间八倍下采样后的尺寸 [252, 100, 50/8]
-        pc_range = torch.from_numpy(np.array(self.point_cloud_range)).to(gt_bboxes_3d) # [-100.8, -40, -3.5, 100.8, 40, 1.5] 点云尺寸
-        stride = (pc_range[3:5] - pc_range[0:2]) / grid_size[0:2] # 实际尺寸和特征图的差距
-        gt_score_map = list()
-        yy, xx = torch.meshgrid(torch.arange(grid_size[1]), torch.arange(grid_size[0])) # 两个都是（100， 252）
-        points = torch.stack([yy, xx]).permute(1, 2, 0).flip(-1) # (100, 252, 2) 最后一个反转操作将存储方法设置为(x,y)格式
-        points = torch.cat([points, torch.ones_like(points[..., 0:1]) * 0.5], dim=-1).reshape([-1, 3]) # （100*252， 3）新增的维度里面存的都是0.5 也就是z轴坐标都是0.5
-        for i in range(len(gt_bboxes_3d)):
-            boxes = gt_bboxes_3d[i] # （max_num, 7）
-            boxes_mask = gt_bboxes_3d_mask[i].bool() # (max_num,)
-            boxes = boxes[boxes_mask] # (n_i, 7)
-            # boxes = boxes[(boxes[:, 3] > 0) & (boxes[:, 4] > 0)] # 这筛选出有效的部分
-            ones = torch.ones_like(boxes[:, 0:1]) # (n_i, 1)
-            bev_boxes = torch.cat([boxes[:, 0:2], ones * 0.5, boxes[:, 3:5], ones * 0.5, boxes[:, 6:7]], dim=-1) # 去除z轴，全部填充0.5 (n_i, 7)
-            bev_boxes[:, 0:2] -= pc_range[0:2] # 减去边界最小值 得到相对偏移
-            bev_boxes[:, 0:2] /= stride # 得到在特征图中的位置
-            bev_boxes[:, 3:5] /= stride # 得到在特征图中的长宽
-
-            box_ids = roiaware_pool3d_utils.points_in_boxes_gpu(
-                points[:, 0:3].unsqueeze(dim=0).float().cuda(), # （1， HW， 3）
-                bev_boxes[:, 0:7].unsqueeze(dim=0).float().cuda() # （1, n_i, 7）
-            ).long().squeeze(dim=0).cpu().numpy() # (1, HW) 不等于-1的部分就是没有落在任何一个box中
-            box_ids = box_ids.reshape([grid_size[1].long(), grid_size[0].long()]) # (100, 252) 
-            mask = torch.from_numpy(box_ids != -1).to(bev_boxes) # (100, 252) 
-            gt_score_map.append(mask)
-        gt_score_map = torch.stack(gt_score_map) # (B, 100, 252) 在box的部分被标记为True
-
-        num_pos = max(gt_score_map.eq(1).float().sum().item(), 1) # max保证至少为1，这是算所有位置的个数，也就是所有前景点的个数
-        
-        loss_score = ClassificationLoss.sigmoid_focal_loss(
-            pred_scores_mask.flatten(0), # 展平 (BHW, )
-            gt_score_map.flatten(0), # (BHW)
-            0.25,
-            gamma=2.0,
-            reduction="sum",
-        )
-        loss_score /= num_pos
-
-        return loss_score
-
-    def loss(self, gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta=None, outputs_class=None, outputs_coord=None):
+    
+    def loss(self, gt_bboxes_3d_single, gt_bboxes_3d_mask_single, gt_labels_3d_single, gt_bboxes_3d, gt_bboxes_3d_mask, gt_labels_3d, pred_dicts, dn_meta=None, outputs_class=None, outputs_coord=None):
         loss_all = 0
         loss_dict = dict()
         targets = list()
+        targets_single = list()
+        # print("gt_bboxes_3d_single shape is ", gt_bboxes_3d_single.shape)
+        # print("gt_bboxes_3d_mask_single shape is ", gt_bboxes_3d_mask_single.shape)
+        # print("gt_labels_3d_single shape is ", gt_labels_3d_single.shape)
+        for batch_idx in range(len(gt_bboxes_3d_single)): # 遍历每个样本
+            target_single = {}
+            gt_bboxes = gt_bboxes_3d_single[batch_idx] # (max_num, 7)
+            gt_bboxes_mask = gt_bboxes_3d_mask_single[batch_idx] # (max_num, )
+            gt_labels = gt_labels_3d_single[batch_idx] # (max_num, )
+
+            valid_bboxes = gt_bboxes[gt_bboxes_mask.bool()]
+            valid_labels = gt_labels[gt_bboxes_mask.bool()]
+
+            target_single['gt_boxes'] = self.encode_bbox(valid_bboxes) # boxes本身是torch.float64 这个encode会让它变成torch.float32
+            target_single['labels'] = valid_labels
+            targets_single.append(target_single)
 
         for batch_idx in range(len(gt_bboxes_3d)): # 遍历每个样本
             target = {}
@@ -805,16 +742,25 @@ class TransIFFRHead(nn.Module):
             targets.append(target)
 
         enc_outputs = pred_dicts['enc_outputs']
-        bin_targets = copy.deepcopy(targets)
+        bin_targets = copy.deepcopy(targets_single)
         # [tgt["labels"].fill_(0) for tgt in bin_targets] NOTE 这个是Github Issue提出的，注释掉后带来了0.2-0.3的提升，这是为什么？ 如果不注释，其实就变成类别无关预测 答：其实这里就是ConQuer的代码中的设置 作者忘删除了，seed 中的dqs就是需要多分类的
-        dqs_losses = self.compute_losses(enc_outputs, bin_targets) # dqs的结果先作为detect输出监督dqs质量选择
-        for k, v in dqs_losses.items():
+        enc_losses = self.compute_losses(enc_outputs, bin_targets) # dqs的结果先作为detect输出监督dqs质量选择
+        for k, v in enc_losses.items():
             loss_all += v
             loss_dict.update({k + "_enc": v.item()})
-        # for k, v in dqs_losses.items():
-        #     loss_dict.update({k + "_debug": v})
-        outputs = pred_dicts['outputs']
-        dec_losses = self.compute_losses(outputs, targets, dn_meta)
+
+        outputs = pred_dicts['outputs'] # list[Dict1, ...] 由于Feature Magnet会导致融合的query数量不同，因此每个样本处理不同
+        # print("pred_logits shape is ", outputs[0]['pred_logits'].shape)
+        # print("pred_boxes shape is ", outputs[0]['pred_boxes'].shape)
+        # print("targets len", len(targets))
+        # print("targets ", targets)
+        dec_losses = {}
+        for batch_idx in range(len(outputs)):
+            dec_losses_b = self.compute_losses(outputs[batch_idx], [targets[batch_idx]], dn_meta)
+            for key, val in dec_losses_b.items():
+                if key not in dec_losses:
+                    dec_losses[key] = 0
+                dec_losses[key] += val                
         for k, v in dec_losses.items():
             loss_all += v
             loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
@@ -857,11 +803,6 @@ class TransIFFRHead(nn.Module):
                     loss_contrastive_dec_li = self.contras_loss_coeff * contrastive_loss / num_gts # 乘上系数=0.2后要除以gt总数，以均衡不同样本的gt数不同引起的数值波动
                     loss_all += loss_contrastive_dec_li
                     loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
-
-        # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
-        # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d.to(torch.float32), gt_bboxes_3d_mask, None) # 前景预测损失
-        # loss_all += loss_score
-        # loss_dict.update({'loss_score': loss_score.item()})
 
         return loss_all, loss_dict
 
@@ -949,6 +890,7 @@ class ClassificationLoss(nn.Module):
         idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, )
         # print("indices is ", indices)
+        # print("src_logits shape is ", src_logits.shape)
         # print("t['labels'] is ", targets[0]['labels'])
         # print("target_classes_o is ", target_classes_o)
 
@@ -965,6 +907,8 @@ class ClassificationLoss(nn.Module):
             # 0 for bg, 1 for fg
             # N, L, C
             target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
+            # print('sum target is ', target_classes_onehot.sum())
+
 
         loss_ce = (
                 self.sigmoid_focal_loss(
@@ -980,7 +924,7 @@ class ClassificationLoss(nn.Module):
         losses = {
             "loss_ce": loss_ce,
         }
-
+        # print("losses ce is ", losses)
         return losses
 
 
@@ -1009,7 +953,7 @@ class RegressionLoss(nn.Module):
             pred_boxes = outputs["pred_boxes"] # （B, 1000, 7）如果是去噪gt （B, pad_size, 7）
 
         target_boxes = torch.cat([t["gt_boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0) # 索引到最佳匹配的gt (n1+n2+..., 7) 也可能是去噪正样本（3*(n1-1) +  3*(n2-1), ....), ）
-
+        # print("target_boxes shape is ", target_boxes)
         src_boxes, src_rads = pred_boxes[idx].split(6, dim=-1) # (n_all, 6), (n_all, 1)
         target_boxes, target_rads = target_boxes.split(6, dim=-1)
 
@@ -1031,11 +975,13 @@ class RegressionLoss(nn.Module):
             "loss_rad": loss_rad.sum() / num_boxes,
         }
 
-        box_preds = self.decode_func(torch.cat([src_boxes, src_rads], dim=-1)) # 反归一化
-        box_target = self.decode_func(torch.cat([target_boxes, target_rads], dim=-1))
-        iou_target = iou3d_nms_utils.paired_boxes_iou3d_gpu(box_preds, box_target) # (n_all, ) iou
-        iou_target = iou_target * 2 - 1 # (0, 1) map 到 (-1, 1)
-        iou_target = iou_target.detach()
+        # box_preds = self.decode_func(torch.cat([src_boxes, src_rads], dim=-1)) # 反归一化
+        # box_target = self.decode_func(torch.cat([target_boxes, target_rads], dim=-1))
+        # iou_target = iou3d_nms_utils.paired_boxes_iou3d_gpu(box_preds, box_target) # (n_all, ) iou
+        # iou_target = iou_target * 2 - 1 # (0, 1) map 到 (-1, 1)
+        # iou_target = iou_target.detach()
+
+        # print("losses reg is ", losses)
 
         return losses
 
@@ -1082,7 +1028,7 @@ class Det3DLoss(nn.Module):
 
     def forward(self, outputs, targets, dn_meta=None):
         '''
-        outputs: Dict, DQS结果或者是模型输出的结果
+        outputs: Dict, Encoder结果或者是模型输出的结果
         targets: List [Dict{}, Dict{}...] batch中按样本分结果
         '''
         # Compute the average number of target boxes accross all nodes, for normalization purposes
@@ -1153,6 +1099,7 @@ class Det3DLoss(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs, targets) # List[((n1),(n1)), ...] 匹配结果索引，注意，这是1000个query与gt的匹配
+        # print("indices is ", indices)
         for loss in self.losses: # ["focal_labels", "boxes"]
             losses.update(self.det3d_losses[loss](outputs, targets, indices, num_boxes))
 

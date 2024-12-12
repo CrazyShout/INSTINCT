@@ -1,0 +1,28 @@
+// 协同信息 cooperative/data_info.json
+{
+"infrastructure_image_path": "infrastructure-side/image/007489.jpg", 
+"infrastructure_pointcloud_path": "infrastructure-side/velodyne/007489.pcd", 
+"vehicle_image_path": "vehicle-side/image/000289.jpg", 
+"vehicle_pointcloud_path": "vehicle-side/velodyne/000289.pcd", 
+"cooperative_label_path": "cooperative/label_world/000289.json", 
+"system_error_offset": {"delta_x": 0.6600000000000001, "delta_y": -1.1}
+}
+// 路端信息 infrastructure-side/data_info.json
+{"pointcloud_path": "velodyne/000009.pcd", 
+"pointcloud_timestamp": "1626240240963473", 
+"lidar_id": "154", 
+"intersection_loc": "yizhuang08", 
+"batch_start_id": "000000", 
+"batch_end_id": "000102", 
+"calib_camera_intrinsic_path": "calib/camera_intrinsic/000009.json", 
+"calib_virtuallidar_to_world_path": "calib/virtuallidar_to_world/000009.json", 
+"calib_virtuallidar_to_camera_path": "calib/virtuallidar_to_camera/000009.json", 
+"label_lidar_std_path": "label/virtuallidar/000009.json", 
+"image_path": "image/000009.jpg", 
+"image_timestamp": "1626240240977808", 
+"label_camera_std_path": "label/camera/000009.json", 
+"camera_ip": "172_18_8_107", 
+"camera_id": "7", 
+"batch_id": "0", 
+"valid_batch_splits": [{"batch_start_id": "000009", "batch_end_id": "000092"}]
+}

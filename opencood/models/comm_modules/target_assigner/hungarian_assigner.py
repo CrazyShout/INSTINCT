@@ -100,7 +100,6 @@ class HungarianMatcher3d(nn.Module):
             pred_boxes = outputs["pred_boxes"] # (B, 1000, 7)
 
         bs, num_queries = pred_logits.shape[:2]
-
         # We flatten to compute the cost matrices in a batch
         out_prob = pred_logits.sigmoid() # (B, 1000, 1)
         # ([batch_size, num_queries, 6], [batch_size, num_queries, 2])

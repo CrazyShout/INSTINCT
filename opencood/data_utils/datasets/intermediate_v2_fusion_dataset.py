@@ -5,6 +5,9 @@ from collections import OrderedDict
 import numpy as np
 import torch
 import copy
+import json
+import os
+import os.path as osp
 from icecream import ic
 from PIL import Image
 import pickle as pkl
@@ -28,7 +31,45 @@ from opencood.utils.pcd_utils import (
     downsample_lidar_minimum,
 )
 from opencood.utils.common_utils import read_json
+from opencood.data_utils.augmentor.data_augmentor import DataAugmentor
 
+def load_json(path):
+    with open(path, mode="r") as f:
+        data = json.load(f)
+    return data
+
+def build_idx_to_info(data):
+    idx2info = {}
+    for elem in data:
+        if elem["pointcloud_path"] == "":
+            continue
+        idx = elem["pointcloud_path"].split("/")[-1].replace(".pcd", "")
+        idx2info[idx] = elem
+    return idx2info
+
+def build_idx_to_co_info(data):
+    idx2info = {}
+    for elem in data:
+        if elem["vehicle_pointcloud_path"] == "":
+            continue
+        idx = elem["vehicle_pointcloud_path"].split("/")[-1].replace(".pcd", "")
+        idx2info[idx] = elem
+    return idx2info
+
+def build_inf_fid_to_veh_fid(data):
+    inf_fid2veh_fid = {}
+    for elem in data:
+        veh_fid = elem["vehicle_pointcloud_path"].split("/")[-1].rstrip('.pcd')
+        inf_fid = elem["infrastructure_pointcloud_path"].split("/")[-1].rstrip('.pcd')
+        inf_fid2veh_fid[inf_fid] = veh_fid
+    return inf_fid2veh_fid
+
+def id_to_str(id, digits=6):
+    result = ""
+    for i in range(digits):
+        result = str(id % 10) + result
+        id //= 10
+    return result
 
 def getIntermediatev2FusionDataset(cls):
     """
@@ -36,15 +77,15 @@ def getIntermediatev2FusionDataset(cls):
     """
     class IntermediateV2FusionDataset(cls):
         def __init__(self, params, visualize, train=True):
-            super().__init__(params, visualize, train)
+            # super().__init__(params, visualize, train) 不需要
             # intermediate and supervise single
             self.supervise_single = True if ('supervise_single' in params['model']['args'] and params['model']['args']['supervise_single']) \
                                         else False
             self.proj_first = False if 'proj_first' not in params['fusion']['args']\
                                          else params['fusion']['args']['proj_first']
 
-            self.anchor_box = self.post_processor.generate_anchor_box()
-            self.anchor_box_torch = torch.from_numpy(self.anchor_box)
+            # self.anchor_box = self.post_processor.generate_anchor_box()
+            # self.anchor_box_torch = torch.from_numpy(self.anchor_box)
 
             self.kd_flag = params.get('kd_flag', False)
 
@@ -54,9 +95,91 @@ def getIntermediatev2FusionDataset(cls):
                 self.stage1_result_path = params['box_align']['train_result'] if train else params['box_align']['val_result']
                 self.stage1_result = read_json(self.stage1_result_path)
                 self.box_align_args = params['box_align']['args']
-                
+            
+            # 从父类迁移过来的
+            self.params = params
+            self.visualize = visualize
+            self.train = train
 
+            self.pre_processor = build_preprocessor(params["preprocess"], train)
+            self.post_processor = build_postprocessor(params["postprocess"], train)
+            self.post_processor.generate_gt_bbx = self.post_processor.generate_gt_bbx_by_iou
+            class_names = params.get('class_names', ['Car'])
+            self.data_augmentor = DataAugmentor(params['data_augment'], train, params['data_dir'], class_names)
 
+            if 'clip_pc' in params['fusion']['args'] and params['fusion']['args']['clip_pc']:
+                self.clip_pc = True
+            else:
+                self.clip_pc = False
+
+            if 'train_params' not in params or 'max_cav' not in params['train_params']:
+                self.max_cav = 2
+            else:
+                self.max_cav = params['train_params']['max_cav']
+
+            self.load_lidar_file = True if 'lidar' in params['input_source'] or self.visualize else False
+            self.load_camera_file = True if 'camera' in params['input_source'] else False
+            self.load_depth_file = True if 'depth' in params['input_source'] else False
+
+            assert self.load_depth_file is False
+
+            self.label_type = params['label_type'] # 'lidar' or 'camera'
+            self.generate_object_center = self.generate_object_center_lidar if self.label_type == "lidar" \
+                                                        else self.generate_object_center_camera
+
+            if self.load_camera_file:
+                self.data_aug_conf = params["fusion"]["args"]["data_aug_conf"]
+
+            if self.train:
+                split_dir = params['root_dir']
+            else:
+                split_dir = params['validate_dir']
+
+            self.root_dir = params['data_dir']
+
+            self.inf_idx2info = build_idx_to_info( # 读取路端标签 形成路端id对应其信息字典的形式
+                load_json(osp.join(self.root_dir, "infrastructure-side/data_info.json"))
+            )
+            self.co_idx2info = build_idx_to_co_info( # 读取协同标签，形成车端id对应该项协同场景的所有信息的形式
+                load_json(osp.join(self.root_dir, "cooperative/data_info.json"))
+            ) # 依旧读取协同标签，形成路端id对应车端id的形式，也就是形成了一一对应
+            self.inf_fid2veh_fid = build_inf_fid_to_veh_fid(load_json(osp.join(self.root_dir, "cooperative/data_info.json"))
+            )
+
+            self.split_info = read_json(split_dir)
+            self.data = []
+            cnt = 0
+            for veh_idx in self.split_info:
+                if self.is_valid_id(veh_idx):
+                    self.data.append(veh_idx)
+                else:
+                    cnt += 1
+            if len(self.split_info) == len(self.data):
+                print("===协同信息无缺失,共 %d 帧==="%len(self.data))
+            if cnt > 0:
+                print("===协同信息缺失%d帧==="%cnt)
+            self.split_info = self.data
+            self.co_data = self.co_idx2info
+            # co_datainfo = read_json(os.path.join(self.root_dir, 'cooperative/data_info.json'))
+            # self.co_data = OrderedDict()
+            # for frame_info in co_datainfo:
+            #     veh_frame_id = frame_info['vehicle_image_path'].split("/")[-1].replace(".jpg", "")
+            #     self.co_data[veh_frame_id] = frame_info
+            if "noise_setting" not in self.params:
+                self.params['noise_setting'] = OrderedDict()
+                self.params['noise_setting']['add_noise'] = False
+
+        def is_valid_id(self, veh_frame_id):
+            frame_info = {}
+            
+            frame_info = self.co_idx2info[veh_frame_id] # 取出协同信息
+            inf_frame_id = frame_info['infrastructure_image_path'].split("/")[-1].replace(".jpg", "") # 当前路端的帧id
+            cur_inf_info = self.inf_idx2info[inf_frame_id] # 取出路端信息
+            delay_id = id_to_str(int(inf_frame_id)) 
+            if delay_id not in self.inf_fid2veh_fid.keys(): # 必须有车路对应
+                return False
+
+            return True
 
         def get_item_single_car(self, selected_cav_base, ego_cav_base):
             """
@@ -118,7 +241,7 @@ def getIntermediatev2FusionDataset(cls):
                 selected_cav_processed.update({'processed_features': processed_lidar})
 
             # generate targets label single GT, note the reference pose is itself. XXX 不太理解，按理说是用来监督单车的，但是generate_object_center其实用的协同标签
-            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
+            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
                 [selected_cav_base], selected_cav_base['params']['lidar_pose']
             )
             # query based不需要生成锚框作为label
@@ -287,6 +410,7 @@ def getIntermediatev2FusionDataset(cls):
                 # if distance is too far, we will just skip this agent
                 if distance > self.params['comm_range']:
                     too_far.append(cav_id)
+                    print("距离太远,距离为: %0.4f"%distance)
                     continue
 
                 lidar_pose_clean_list.append(selected_cav_base['params']['lidar_pose_clean'])

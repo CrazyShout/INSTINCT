@@ -108,7 +108,7 @@ def main():
     for key, val in vars(opt).items():
         logger.info('{:16} {}'.format(key, val))
 
-    logger.info(model)
+    # logger.info(model)
     num_total_params = sum([x.numel() for x in model.parameters()])
     logger.info(f'Total number of parameters: {num_total_params}')
 
