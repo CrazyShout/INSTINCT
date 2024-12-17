@@ -129,11 +129,12 @@ def main():
     supervise_single_flag = False if not hasattr(opencood_train_dataset, "supervise_single") else opencood_train_dataset.supervise_single
     # used to help schedule learning rate
 
+    flames = ['🔥', '💨', '✨', '🚀']
     for epoch in range(init_epoch, max_epoch):
         for param_group in optimizer.param_groups:
             logger.info('learning rate %f' % param_group["lr"])
             cur_lr = param_group["lr"]
-        pbar2 = tqdm(total=batch_len, leave=True, colour='#DDA0DD') # 进度条
+        pbar2 = tqdm(total=batch_len, leave=True, ascii="░▒█", colour="#FF69B4") # 进度条
         start_time_batch = time.time()
         for i, batch_data in enumerate(train_loader):
             if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0: # 没有gt
@@ -154,8 +155,9 @@ def main():
             #     final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") # type: ignore
             #     criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
+            flame = flames[i % len(flames)]
             sample_idx = epoch*batch_len + i
-            pbar2.set_description("[epoch %d][%d/%d]%s, || Loss: %.4f" %(epoch, i + 1, batch_len, '', final_loss))
+            pbar2.set_description("🚀 [epoch %d][%d/%d]%s %s, || Loss: %.4f" %(epoch, i + 1, batch_len, '', flame, final_loss))
             pbar2.update()
             writer.add_scalar('train/loss', final_loss, sample_idx)
             for key, val in tb_dict.items():
