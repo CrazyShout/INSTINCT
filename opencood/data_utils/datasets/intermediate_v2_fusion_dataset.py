@@ -410,7 +410,7 @@ def getIntermediatev2FusionDataset(cls):
                 # if distance is too far, we will just skip this agent
                 if distance > self.params['comm_range']:
                     too_far.append(cav_id)
-                    print("距离太远,距离为: %0.4f"%distance)
+                    # print("距离太远,距离为: %0.4f"%distance)
                     continue
 
                 lidar_pose_clean_list.append(selected_cav_base['params']['lidar_pose_clean'])
@@ -751,8 +751,12 @@ def getIntermediatev2FusionDataset(cls):
             gt_box_tensor : torch.Tensor
                 The tensor of gt bounding box.
             """
-            pred_box_tensor, pred_score = \
-                self.post_processor.post_process(data_dict, output_dict)
+            # pred_box_tensor, pred_score = \
+            #     self.post_processor.post_process(data_dict, output_dict)
+            pred_box_tensor = output_dict["ego"]['pred_boxes']
+            pred_score = output_dict["ego"]['pred_scores']
+            from opencood.utils import box_utils
+            pred_box_tensor = box_utils.boxes_to_corners_3d(pred_box_tensor, order='lwh')
             gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
             return pred_box_tensor, pred_score, gt_box_tensor

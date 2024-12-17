@@ -203,6 +203,89 @@ def boxes_to_corners_3d(boxes3d, order):
 
     return corners3d.numpy() if is_numpy else corners3d
 
+# add by xuyunjiang at 2024-12-14
+def corners_to_boxes_3d(corners3d, order):
+    """
+    将由 boxes_to_corners_3d 生成的 8 个角点反推回原始的 box 参数。
+    
+    参数
+    ----
+    corners3d: np.ndarray or torch.Tensor
+        (N, 8, 3) 的张量或数组，对应 8 个角点的世界坐标系位置。
+    order: str
+        'lwh' 或 'hwl'，对应原始盒子参数的顺序。
+        
+    返回
+    ----
+    boxes3d: np.ndarray or torch.Tensor
+        (N, 7)，格式与输入一致 [x, y, z, l, w, h, heading] 或 [x, y, z, h, w, l, heading]
+    """
+    corners3d, is_numpy = common_utils.check_numpy_to_torch(corners3d)
+
+    # 中心点为8个角点的平均值
+    center = corners3d.mean(dim=1)  # (N,3)
+    # 将角点平移，使中心位于原点，便于计算尺寸和朝向
+    aligned_corners = corners3d - center[:, None, :]
+
+    # 根据 boxes_to_corners_3d 中的定义:
+    # 角点顺序(无旋转时):
+    #   4 -------- 5
+    #  /|         /|
+    # 7 -------- 6 .
+    # | |        | |
+    # . 0 -------- 1
+    # |/         |/
+    # 3 -------- 2
+    #
+    # 在初始状态（未旋转）下：
+    # corner0 = (+l/2, -w/2, -h/2)
+    # corner1 = (+l/2, +w/2, -h/2)
+    # corner3 = (-l/2, -w/2, -h/2)
+    # corner4 = (+l/2, -w/2, +h/2)
+    #
+    # 因此：
+    # 长度方向：0和3为一对，沿 x 轴方向
+    # 宽度方向：0和1为一对，沿 y 轴方向
+    # 高度方向：0和4为一对，沿 z 轴方向
+
+    c0 = aligned_corners[:, 0, :]  # corner0
+    c1 = aligned_corners[:, 1, :]  # corner1
+    c3 = aligned_corners[:, 3, :]  # corner3
+    c4 = aligned_corners[:, 4, :]  # corner4
+
+    # 计算长度、宽度、高度（绝对值）
+    # l = 距离(corner0, corner3) 在 xy 平面投影长度
+    # w = 距离(corner0, corner1) 在 xy 平面投影宽度
+    # h = 距离(corner0, corner4) 在 z 方向的高度
+    length_vec = c0[:, :2] - c3[:, :2]  # 从3到0是长度方向(正x方向)
+    length = length_vec.norm(dim=1)
+    torch.norm
+    width_vec = c1[:, :2] - c0[:, :2]
+    width = width_vec.norm(dim=1)
+    height = (c4[:, 2] - c0[:, 2]).abs()
+
+    # 确保 length_vec 指向正 x 的方向，用于计算 heading
+    # 如果 length_vec 的 x 分量为负，则翻转它（这样 atan2 计算的heading能与原定义匹配）
+    flip_mask = length_vec[:, 0] < 0
+    length_vec[flip_mask] = -length_vec[flip_mask]
+
+    # heading：atan2(y, x)
+    heading = torch.atan2(length_vec[:, 1], length_vec[:, 0])
+
+    # 拼接结果，维度顺序根据 order 来决定
+    if order == 'lwh':
+        boxes3d = torch.stack((center[:, 0], center[:, 1], center[:, 2],
+                               length, width, height, heading), dim=-1)
+    elif order == 'hwl':
+        # 如果原始是 hwl，则需要调整顺序
+        # lwh -> hwl: (x, y, z, h, w, l, heading)
+        boxes3d = torch.stack((center[:, 0], center[:, 1], center[:, 2],
+                               height, width, length, heading), dim=-1)
+    else:
+        raise ValueError(f"Invalid order: {order}")
+
+    return boxes3d.numpy() if is_numpy else boxes3d
+
 
 def box3d_to_2d(box3d):
     """

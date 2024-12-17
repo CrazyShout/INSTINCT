@@ -246,7 +246,7 @@ class Where2comm(nn.Module):
 
         # (B,L,L,2,3)
         pairwise_t_matrix = pairwise_t_matrix[:,:,:,[0, 1],:][:,:,:,:,[0, 1, 3]] # [B, L, L, 2, 3]
-        pairwise_t_matrix[...,0,1] = pairwise_t_matrix[...,0,1] * H / W
+        pairwise_t_matrix[...,0,1] = pairwise_t_matrix[...,0,1] * H / W # 考虑长宽比例，对角的自旋部分不用考虑，而非对角部分旋转数值表示两轴耦合，受到比例影响
         pairwise_t_matrix[...,1,0] = pairwise_t_matrix[...,1,0] * W / H
         pairwise_t_matrix[...,0,2] = pairwise_t_matrix[...,0,2] / (self.downsample_rate * self.discrete_ratio * W) * 2
         pairwise_t_matrix[...,1,2] = pairwise_t_matrix[...,1,2] / (self.downsample_rate * self.discrete_ratio * H) * 2

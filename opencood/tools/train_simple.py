@@ -181,6 +181,7 @@ def main():
             # optimizer.zero_grad()
 
             # back-propagation
+            # torch.autograd.set_detect_anomaly(True) # 异常检测，debug only use
             final_loss.backward()
 
             # print("Gradient norm for classification head:", torch.norm(model.dense_head.transformer.proposal_head.class_embed[0].layers[-1].weight.grad))

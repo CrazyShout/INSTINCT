@@ -328,7 +328,7 @@ def warp_affine_simple(src, M, dsize,
     grid = F.affine_grid(M,
                          [B, C, dsize[0], dsize[1]],
                          align_corners=align_corners).to(src)
-    return F.grid_sample(src, grid, align_corners=align_corners)
+    return F.grid_sample(src, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
 
 def warp_affine(
         src, M, dsize,
