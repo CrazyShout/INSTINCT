@@ -592,8 +592,25 @@ class TransIFFRHead(nn.Module):
 
     def get_bboxes(self, pred_dicts):
         outputs = pred_dicts['outputs']
-        out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
-        out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
+        preds = []
+        bboxes = []
+        for output in outputs:
+            len_o = output['pred_logits'].size(1)
+            
+            preds_sample = torch.zeros(1, self.num_queries, 1)
+            bboxes_sample = torch.zeros(1, self.num_queries, 7)
+            preds_sample[:, :len_o, :] = output['pred_logits']
+            bboxes_sample[:, :len_o, :] = output['pred_boxes']
+            preds.append(preds_sample)
+            bboxes.append(bboxes_sample)
+        preds = torch.cat(preds, dim=1)
+        bboxes = torch.cat(bboxes, dim=1)
+
+        out_logits = preds # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
+        out_bbox = bboxes # (B, 1000, 7)
+
+        # out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
+        # out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
         batch_size = out_logits.shape[0]
 
         out_prob = out_logits.sigmoid()
