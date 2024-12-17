@@ -145,7 +145,6 @@ def main():
             optimizer.zero_grad()
             batch_data = train_utils.to_device(batch_data, device)
             batch_data['ego']['epoch'] = epoch # type: ignore
-            ouput_dict = model(batch_data['ego']) # type: ignore
             final_loss, tb_dict = model(batch_data['ego']) # type: ignore
             final_loss = final_loss.mean()
             # final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])

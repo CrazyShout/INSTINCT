@@ -8,7 +8,7 @@ class_names: ['Car']
 
 yaml_parser: "load_second_params"
 train_params:
-  batch_size: &batch_size 3
+  batch_size: &batch_size 6
   epoches: 60
   eval_freq: 1
   save_freq: 1
