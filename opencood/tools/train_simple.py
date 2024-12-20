@@ -145,6 +145,8 @@ def main():
             optimizer.zero_grad()
             batch_data = train_utils.to_device(batch_data, device)
             batch_data['ego']['epoch'] = epoch # type: ignore
+
+            # 前向传播和计算损失
             final_loss, tb_dict = model(batch_data['ego']) # type: ignore
             final_loss = final_loss.mean()
             # final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
@@ -191,9 +193,18 @@ def main():
 
             total_norm = clip_grad_norm_(model.parameters(), 10) # 梯度剪裁，防止梯度爆炸
             optimizer.step()
+            """
+            scheduler.step()的调用时机：
+            StepLR / MultiStepLR	    每个 epoch 结束后调用
+            OneCycleLR / FadeScheduler	每个 batch 结束后调用
+            ExponentialLR	            每个 epoch 或 batch 调用，具体需求决定
+            """
+            cur_lr = optimizer.param_groups[0]['lr']
+            scheduler.step()
 
             # torch.cuda.empty_cache()
         writer.add_scalar('meta_data/learning_rate', cur_lr, epoch) # 学习率train一轮后记录一次
+        logger.info(f"=== current lr is {cur_lr} ===")
         end_time = time.time()
         # second_each_iter = pbar2.format_dict['elapsed'] / max(batch_len, 1.0)
         epoch_cost = (end_time - start_time_batch)/60
@@ -247,6 +258,7 @@ def main():
             torch.save(model.state_dict(),
                        os.path.join(saved_path,
                                     'net_epoch%d.pth' % (epoch + 1)))
+        # 验证阶段需要scherduler.step()吗？
         scheduler.step()
 
         opencood_train_dataset.reinitialize()
