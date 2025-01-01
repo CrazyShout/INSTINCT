@@ -157,6 +157,7 @@ class CQCPHead(nn.Module):
         dropout = self.model_cfg['dropout'] # 0.0
         activation = self.model_cfg['activation']
         ffn_channel = self.model_cfg['ffn_channel'] # 1024
+        num_encoder_layers = self.model_cfg['num_encoder_layers'] # 6
         num_decoder_layers = self.model_cfg['num_decoder_layers'] # 6
         self.code_size = self.model_cfg['code_size'] # 7
 
@@ -183,7 +184,7 @@ class CQCPHead(nn.Module):
             d_model=self.hidden_channel, # 256
             nhead=num_heads, # 8
             nlevel=1,
-            num_encoder_layers=num_decoder_layers, # 6
+            num_encoder_layers=num_encoder_layers, # 6
             num_decoder_layers=num_decoder_layers, # 6
             dim_feedforward=ffn_channel, # 1024
             dropout=dropout, # 0.0
@@ -336,7 +337,7 @@ class CQCPHead(nn.Module):
         hidden_state: (3, B, pad_size + all_query_num + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是Decoder layer每一层的query
         init_reference: (B, pad_size + all_query_num + 4*max_gt_num, 7) 6批噪声gt+初始的all_query_num个box 加上 4批 gt, 第一批是gt,后面3批示噪声gt正样本
         inter_references: (3, B, pad_size + all_query_num + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
-        src_embed: (B, H*W, 256) 粗查询, 经过了一层DGA layer后scatter回去
+        src_embed: (B, H*W, 256) 粗查询, 经过了三层Encoder layer后scatter回去
         src_ref_windows: (B, H * W, 7) 参考框，类似于锚框
         src_indexes: (B, query_num, 1) ego个fined dqs query 索引 其中all_query_num == query_num + extra_num 这个用于监督encoder的单车输出
         '''

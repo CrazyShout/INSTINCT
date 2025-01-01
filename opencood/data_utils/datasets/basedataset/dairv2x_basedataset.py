@@ -246,7 +246,7 @@ class DAIRV2XBaseDataset(Dataset):
         )
         return camera_to_lidar, camera_intrinsic
 
-    def augment(self, lidar_np, object_bbx_center, object_bbx_mask):
+    def augment(self, lidar_np, object_bbx_center, object_bbx_mask, random_seed=None, choice=None):
         """
         Given the raw point cloud, augment by flipping and rotation.
         Parameters
@@ -261,7 +261,12 @@ class DAIRV2XBaseDataset(Dataset):
         tmp_dict = {'lidar_np': lidar_np,
                     'object_bbx_center': object_bbx_center,
                     'object_bbx_mask': object_bbx_mask}
-        tmp_dict = self.data_augmentor.forward(tmp_dict)
+        if random_seed:
+            self.data_augmentor.random_seed = random_seed
+        if choice:
+            tmp_dict = self.data_augmentor.forward(tmp_dict, choice)
+        else:
+            tmp_dict = self.data_augmentor.forward(tmp_dict)
 
         lidar_np = tmp_dict['lidar_np']
         object_bbx_center = tmp_dict['object_bbx_center']
@@ -318,13 +323,13 @@ class DAIRV2XBaseDataset(Dataset):
                 for cav_id, selected_cav_base in base_data_dict.items():
                     # transformation
                     transformation_matrix = x1_to_x2(selected_cav_base['params']['lidar_pose'], ego_lidar_pose)
-                    lidar_np = selected_cav_base['lidar_np']
+                    lidar_np = selected_cav_base['lidar_np'] # n,4
                     # project the lidar to ego space
                     lidar_np[:, :3] = \
                         box_utils.project_points_by_matrix_torch(lidar_np[:, :3], transformation_matrix)
                     # all these lidar and object coordinates are projected to ego already.
                     projected_lidar_stack.append(lidar_np)
-                projected_lidar_stack = np.vstack(projected_lidar_stack)
+                projected_lidar_stack = np.vstack(projected_lidar_stack) # (n1+n2, 4)
                 points = projected_lidar_stack
                 annos = base_data_dict[0]['params']['vehicles_all'] # 协同下的label
                 boxes_lidar, _ = project_world_objects_dairv2x(annos, ego_lidar_pose)

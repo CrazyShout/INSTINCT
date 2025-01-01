@@ -154,6 +154,7 @@ class BasePostprocessor(object):
             object_bbx_corner = \
                 box_utils.boxes_to_corners_3d(object_bbx_center,
                                               self.params['order'])
+            # projected_object_bbx_corner = object_bbx_corner # only for debug 我想visualize 路端的single结果
             projected_object_bbx_corner = \
                 box_utils.project_box3d(object_bbx_corner.float(),
                                         transformation_matrix)

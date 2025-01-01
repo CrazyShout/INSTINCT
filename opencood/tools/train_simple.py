@@ -147,12 +147,6 @@ def main():
             batch_data['ego']['epoch'] = epoch # type: ignore
             final_loss, tb_dict = model(batch_data['ego']) # type: ignore
             final_loss = final_loss.mean()
-            # final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
-            # criterion.logging(epoch, i, len(train_loader), writer)
-
-            # if supervise_single_flag:
-            #     final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") # type: ignore
-            #     criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
             flame = flames[i % len(flames)]
             sample_idx = epoch*batch_len + i
@@ -187,6 +181,7 @@ def main():
 
             # print("Gradient norm for classification head:", torch.norm(model.dense_head.transformer.proposal_head.class_embed[0].layers[-1].weight.grad))
             # print("Gradient norm for bbox head:", torch.norm(model.dense_head.transformer.proposal_head.bbox_embed[0].layers[-1].weight.grad))
+            # print("Gradient norm for bbox head:", torch.norm(model.bbox_embed[0].weight.grad))
             # print("Gradient norm for bbox head:", torch.norm(model.bbox_embed[0].weight.grad))
 
             total_norm = clip_grad_norm_(model.parameters(), 10) # 梯度剪裁，防止梯度爆炸

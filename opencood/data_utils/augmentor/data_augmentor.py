@@ -33,6 +33,7 @@ class DataAugmentor(object):
         self.train = train
         self.data_dir = data_dir
         self.class_names = class_names
+        self.random_seed = None
 
         for cur_cfg in augment_config:
             cur_augmentor = getattr(self, cur_cfg['NAME'])(config=cur_cfg)
@@ -114,7 +115,7 @@ class DataAugmentor(object):
 
         return data_dict
 
-    def forward(self, data_dict):
+    def forward(self, data_dict, choice=None):
         """
         Args:
             data_dict:
@@ -122,11 +123,17 @@ class DataAugmentor(object):
                 gt_boxes: optional, (N, 7) [x, y, z, dx, dy, dz, heading]
                 gt_names: optional, (N), string
                 ...
-
+            choice:
+                choose specific augmentation
         Returns:
         """
         if self.train:
-            for cur_augmentor in self.data_augmentor_queue:
+            if choice == None:
+                choice = 0
+            for cur_augmentor in self.data_augmentor_queue[choice:]:
+                #for apply same augmentation
+                if self.random_seed:
+                    np.random.seed(self.random_seed)
                 data_dict = cur_augmentor(data_dict=data_dict)
-
+            self.random_seed = None
         return data_dict

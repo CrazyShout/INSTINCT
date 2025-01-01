@@ -160,8 +160,6 @@ def getIntermediatev2FusionDataset(cls):
                 print("===协同信息缺失%d帧==="%cnt)
             self.split_info = self.data
             self.co_data = self.co_idx2info
-            # self.db_num = 0
-
             # co_datainfo = read_json(os.path.join(self.root_dir, 'cooperative/data_info.json'))
             # self.co_data = OrderedDict()
             # for frame_info in co_datainfo:
@@ -213,23 +211,7 @@ def getIntermediatev2FusionDataset(cls):
             transformation_matrix_clean = \
                 x1_to_x2(selected_cav_base['params']['lidar_pose_clean'],
                         ego_pose_clean)
-
-            '''
-            加了 gt sampling后不太好直接监督single, 所以我们直接使用协同label作为gt
-            XXX 反思一下这个时候到底要用协同标签还是single 标签?
-            用协同label 则更好说明了lidar范围内的检测情况
-            用单车label 则更好表现了lidar范围内有效标注的检测情况
-            '''
             
-            # note the reference pose ego 这里是处理only ego的情况，但是仍然要使用协同标签 XXX 这是是否要使用协同标签？
-            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center([selected_cav_base],
-                                                        ego_pose_clean)
-
-            # # generate targets label single GT, note the reference pose is itself. XXX 不太理解，按理说是用来监督单车的，但是generate_object_center其实用的协同标签
-            # object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
-            #     [selected_cav_base], selected_cav_base['params']['lidar_pose']
-            # )
-
             # lidar
             if self.load_lidar_file or self.visualize:
                 # process lidar
@@ -245,14 +227,6 @@ def getIntermediatev2FusionDataset(cls):
                 if self.proj_first:
                     lidar_np[:, :3] = projected_lidar
 
-                # data augmentation for single
-                if selected_cav_base['ego']:
-                    lidar_np, object_bbx_center, object_bbx_mask = self.augment(lidar_np, object_bbx_center, object_bbx_mask)
-                    projected_lidar = copy.deepcopy(lidar_np)[:,:3] # 只有单车 不必空间变换
-                else:
-                    print('fuck!')
-                    raise ValueError("fuck!")
-
                 if self.visualize:
                     # filter lidar
                     selected_cav_processed.update({'projected_lidar': projected_lidar})
@@ -266,7 +240,16 @@ def getIntermediatev2FusionDataset(cls):
                 processed_lidar = self.pre_processor.preprocess(lidar_np)
                 selected_cav_processed.update({'processed_features': processed_lidar})
 
+            # generate targets label single GT, note the reference pose is itself. XXX 不太理解，按理说是用来监督单车的，但是generate_object_center其实用的协同标签
+            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
+                [selected_cav_base], selected_cav_base['params']['lidar_pose']
+            )
+            # query based不需要生成锚框作为label
+            # label_dict = self.post_processor.generate_label( 
+            #     gt_box_center=object_bbx_center, anchors=self.anchor_box, mask=object_bbx_mask
+            # )
             selected_cav_processed.update({
+                                # "single_label_dict": label_dict,
                                 "single_object_bbx_center": object_bbx_center,
                                 "single_object_bbx_mask": object_bbx_mask})
 
@@ -354,9 +337,12 @@ def getIntermediatev2FusionDataset(cls):
                     }
                 )
 
-            # # note the reference pose ego 这里是处理only ego的情况，但是仍然要使用协同标签 XXX 这是是否要使用协同标签？
-            # object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center([selected_cav_base],
-            #                                             ego_pose_clean)
+            # anchor box
+            # selected_cav_processed.update({"anchor_box": self.anchor_box})
+
+            # note the reference pose ego
+            object_bbx_center, object_bbx_mask, object_ids = self.generate_object_center([selected_cav_base],
+                                                        ego_pose_clean)
 
             selected_cav_processed.update(
                 {
@@ -370,218 +356,6 @@ def getIntermediatev2FusionDataset(cls):
 
 
             return selected_cav_processed
-
-        def get_item_all_agent(self, selected_cav_base, selected_inf_base, ego_cav_base):
-            """
-            Process all CAV's information for the train/test pipeline.
-
-
-            Parameters
-            ----------
-            selected_cav_base : dict
-                The dictionary contains a single CAV's raw information.
-            selected_inf_base : dict
-                The dictionary contains a single CAV's raw information.
-            Returns
-            -------
-            selected_cav_processed : dict
-                The dictionary contains the cav's processed information.
-            selected_inf_processed : dict
-                The dictionary contains the inf's processed information.
-            """
-            selected_cav_processed = {}
-            selected_inf_processed = {}
-
-            ego_pose, ego_pose_clean = ego_cav_base['params']['lidar_pose'], ego_cav_base['params']['lidar_pose_clean']
-
-            # calculate the transformation matrix for cav
-            transformation_matrix_cav = x1_to_x2(selected_cav_base['params']['lidar_pose'], ego_pose)
-            transformation_matrix_clean_cav = x1_to_x2(selected_cav_base['params']['lidar_pose_clean'], ego_pose_clean)
-            cav_bbx_center, cav_bbx_mask, cav_ids = self.generate_object_center([selected_cav_base], ego_pose_clean)
-            # calculate the transformation matrix for inf
-            transformation_matrix_inf = x1_to_x2(selected_inf_base['params']['lidar_pose'], ego_pose) 
-            transformation_matrix_clean_inf = x1_to_x2(selected_inf_base['params']['lidar_pose_clean'], ego_pose_clean)
-            # TODO 以下是针对DairV2X特异化处理的，需要修改以支持别的数据集
-            # selected_inf_base['params']['vehicles_all'] = selected_cav_base['params']['vehicles_all'] # 这里必须要把协同标签拿过来，因为在Dair中只有车端有协同标签
-            inf_bbx_center, inf_bbx_mask, inf_ids = self.generate_object_center([selected_inf_base], ego_pose_clean)
-
-            # lidar
-            if self.load_lidar_file or self.visualize:
-                # process lidar for cav
-                lidar_np_cav = selected_cav_base['lidar_np']
-                lidar_np_cav = shuffle_points(lidar_np_cav)
-                lidar_np_cav = mask_ego_points(lidar_np_cav)# remove points that hit itself
-                # process lidar for inf
-                lidar_np_inf = selected_inf_base['lidar_np']
-                lidar_np_inf = shuffle_points(lidar_np_inf)
-                lidar_np_inf = mask_ego_points(lidar_np_inf)
-                # data augmentation for both cav and inf 
-                random_seed = np.random.randint(100000) #for same random augmentation
-                # gt sampling 中使用的fusion sample, 是基于ego 坐标系生成的
-                projected_lidar_cav = box_utils.project_points_by_matrix_torch(lidar_np_cav[:, :3], transformation_matrix_cav)# project the lidar to ego space
-                lidar_proj_np_cav = copy.deepcopy(lidar_np_cav)
-                lidar_proj_np_cav[:,:3] = projected_lidar_cav # 点云变为投影后的点云 这里使用的是协同标签
-                lidar_np_cav, cav_bbx_center, cav_bbx_mask = self.augment(lidar_proj_np_cav, cav_bbx_center, cav_bbx_mask, random_seed) #choice=1 skip gt_sampling
-                # print("cav_bbx_center[cav_bbx_mask == 1] shape is ", cav_bbx_center[cav_bbx_mask == 1].shape)
-
-                projected_lidar_inf = box_utils.project_points_by_matrix_torch(lidar_np_inf[:, :3], transformation_matrix_inf)# project the lidar to ego space
-                lidar_proj_np_inf = copy.deepcopy(lidar_np_inf)
-                lidar_proj_np_inf[:,:3] = projected_lidar_inf
-                # print("before aug lidar_proj_np_inf shape is ", lidar_proj_np_inf.shape)
-                # print("before aug inf_bbx_center[inf_bbx_mask == 1] shape is ", inf_bbx_center[inf_bbx_mask == 1].shape)
-                # 路端不需要增强，本质上是ego在做协同 所以只增强ego的gt
-                lidar_np_inf, inf_bbx_center, inf_bbx_mask = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, choice=1) #choice=1 skip gt_sampling
-                # print("after aug inf_bbx_center[inf_bbx_mask == 1] shape is ", inf_bbx_center[inf_bbx_mask == 1].shape)
-                # print("after aug lidar_proj_np_inf shape is ", lidar_proj_np_inf.shape)
-
-                # if self.db_num > 10:
-                #     exit()
-                # else:
-                #     self.db_num += 1
-
-                if self.visualize:
-                    # filter lidar
-                    selected_cav_processed.update({'projected_lidar': projected_lidar_cav})
-                    selected_inf_processed.update({'projected_lidar': projected_lidar_inf})
-
-                if self.kd_flag:
-                    selected_cav_processed.update({'projected_lidar': lidar_np_cav}) #lidar_proj_np_cav
-                    selected_inf_processed.update({'projected_lidar': lidar_np_inf})
-
-                transformation_matrix_inf_inv = x1_to_x2(ego_pose, selected_inf_base['params']['lidar_pose']) 
-                projected_back_lidar_inf = box_utils.project_points_by_matrix_torch(lidar_np_inf[:, :3], transformation_matrix_inf_inv)# project the lidar to ego space
-                lidar_proj_np_inf = copy.deepcopy(lidar_np_inf)
-                lidar_proj_np_inf[:,:3] = projected_back_lidar_inf
-                processed_lidar_cav = self.pre_processor.preprocess(lidar_np_cav) # 体素化
-                processed_lidar_inf = self.pre_processor.preprocess(lidar_proj_np_inf) # 重新投影回去
-
-                selected_cav_processed.update({'processed_features': processed_lidar_cav})
-                selected_inf_processed.update({'processed_features': processed_lidar_inf})
-
-            selected_cav_processed.update(
-                {
-                    "object_bbx_center": cav_bbx_center[cav_bbx_mask == 1],
-                    "object_bbx_mask": cav_bbx_mask,
-                    "object_ids": cav_ids,
-                    'transformation_matrix': transformation_matrix_cav,
-                    'transformation_matrix_clean': transformation_matrix_clean_cav,
-                }
-            )
-            selected_inf_processed.update(
-                {
-                    "object_bbx_center": inf_bbx_center[inf_bbx_mask == 1],
-                    "object_bbx_mask": inf_bbx_mask,
-                    "object_ids": inf_ids,
-                    'transformation_matrix': transformation_matrix_inf,
-                    'transformation_matrix_clean': transformation_matrix_clean_inf,
-                }
-            )
-
-            '''
-            interesting! ego 我们做gt sampling, 但是other agent 我们没做, 所以ego的单车监督用协同标签
-            而other agents 我们使用其自身的single 标签
-            '''
-            # generate targets label single GT, note the reference pose is itself. XXX 不太理解，按理说是用来监督单车的，但是generate_object_center其实用的协同标签
-            # cav_bbx_center, cav_bbx_mask, cav_ids = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
-            #     [selected_cav_base], selected_cav_base['params']['lidar_pose']
-            # )
-            inf_bbx_center, inf_bbx_mask, inf_ids = self.generate_object_center_single( # NOTE infra side 也要进行单车监督，需要其single label
-                [selected_inf_base], selected_inf_base['params']['lidar_pose']
-            )
-            # _, inf_bbx_center, inf_bbx_mask = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, choice=1)
-
-            selected_cav_processed.update({
-                                "single_object_bbx_center": cav_bbx_center,
-                                "single_object_bbx_mask": cav_bbx_mask})
-
-            selected_inf_processed.update({
-                                "single_object_bbx_center": inf_bbx_center,
-                                "single_object_bbx_mask": inf_bbx_mask})
-            # camera
-            if self.load_camera_file:
-                camera_data_list = selected_cav_base["camera_data"]
-
-                params = selected_cav_base["params"]
-                imgs = []
-                rots = []
-                trans = []
-                intrins = []
-                extrinsics = []
-                post_rots = []
-                post_trans = []
-
-                for idx, img in enumerate(camera_data_list):
-                    camera_to_lidar, camera_intrinsic = self.get_ext_int(params, idx)
-
-                    intrin = torch.from_numpy(camera_intrinsic)
-                    rot = torch.from_numpy(
-                        camera_to_lidar[:3, :3]
-                    )  # R_wc, we consider world-coord is the lidar-coord
-                    tran = torch.from_numpy(camera_to_lidar[:3, 3])  # T_wc
-
-                    post_rot = torch.eye(2)
-                    post_tran = torch.zeros(2)
-
-                    img_src = [img]
-
-                    # depth
-                    if self.load_depth_file:
-                        depth_img = selected_cav_base["depth_data"][idx]
-                        img_src.append(depth_img)
-                    else:
-                        depth_img = None
-
-                    # data augmentation
-                    resize, resize_dims, crop, flip, rotate = sample_augmentation(
-                        self.data_aug_conf, self.train
-                    )
-                    img_src, post_rot2, post_tran2 = img_transform(
-                        img_src,
-                        post_rot,
-                        post_tran,
-                        resize=resize,
-                        resize_dims=resize_dims,
-                        crop=crop,
-                        flip=flip,
-                        rotate=rotate,
-                    )
-                    # for convenience, make augmentation matrices 3x3
-                    post_tran = torch.zeros(3)
-                    post_rot = torch.eye(3)
-                    post_tran[:2] = post_tran2
-                    post_rot[:2, :2] = post_rot2
-
-                    # decouple RGB and Depth
-
-                    img_src[0] = normalize_img(img_src[0])
-                    if self.load_depth_file:
-                        img_src[1] = img_to_tensor(img_src[1]) * 255
-
-                    imgs.append(torch.cat(img_src, dim=0))
-                    intrins.append(intrin)
-                    extrinsics.append(torch.from_numpy(camera_to_lidar))
-                    rots.append(rot)
-                    trans.append(tran)
-                    post_rots.append(post_rot)
-                    post_trans.append(post_tran)
-                    
-
-                selected_cav_processed.update(
-                    {
-                    "image_inputs": 
-                        {
-                            "imgs": torch.stack(imgs), # [Ncam, 3or4, H, W]
-                            "intrins": torch.stack(intrins),
-                            "extrinsics": torch.stack(extrinsics),
-                            "rots": torch.stack(rots),
-                            "trans": torch.stack(trans),
-                            "post_rots": torch.stack(post_rots),
-                            "post_trans": torch.stack(post_trans),
-                        }
-                    }
-                )
-
-            return selected_cav_processed, selected_inf_processed
 
         def __getitem__(self, idx):
             base_data_dict = self.retrieve_base_data(idx)
@@ -689,43 +463,32 @@ def getIntermediatev2FusionDataset(cls):
             lidar_poses_clean = np.array(lidar_pose_clean_list).reshape(-1, 6)  # [N_cav, 6]
             
             # merge preprocessed features from different cavs into the same dict
-            cav_num = len(cav_id_list) # 1 or 2 Dair中就这几种可能
+            cav_num = len(cav_id_list)
             
-            if cav_num == 1:
-                selected_cav_base = base_data_dict[0] # ego的 信息
-                selected_cav_processed = self.get_item_single_car(selected_cav_base, ego_cav_base)
+            
+            for _i, cav_id in enumerate(cav_id_list):
+                selected_cav_base = base_data_dict[cav_id]
+                selected_cav_processed = self.get_item_single_car(
+                    selected_cav_base,
+                    ego_cav_base)
                     
                 object_stack.append(selected_cav_processed['object_bbx_center'])
                 object_id_stack += selected_cav_processed['object_ids']
                 if self.load_lidar_file:
-                    processed_features.append(selected_cav_processed['processed_features'])
+                    processed_features.append(
+                        selected_cav_processed['processed_features'])
+                if self.load_camera_file:
+                    agents_image_inputs.append(
+                        selected_cav_processed['image_inputs'])
 
                 if self.visualize or self.kd_flag:
-                    projected_lidar_stack.append(selected_cav_processed['projected_lidar'])
-
-                if self.supervise_single: # 用于监督单车检测结果用的，比如说where2comm就这样做
-                    single_object_bbx_center_list.append(selected_cav_processed['single_object_bbx_center'])
-                    single_object_bbx_mask_list.append(selected_cav_processed['single_object_bbx_mask'])
-            else:
-                selected_cav_processed, selected_inf_processed = self.get_item_all_agent(base_data_dict[0], base_data_dict[1], ego_cav_base)           
-                object_stack.append(selected_cav_processed['object_bbx_center'])
-                object_stack.append(selected_inf_processed['object_bbx_center'])
-                object_id_stack += selected_cav_processed['object_ids']
-                object_id_stack += selected_inf_processed['object_ids']
-                if self.load_lidar_file:
-                    processed_features.append(selected_cav_processed['processed_features'])
-                    processed_features.append(selected_inf_processed['processed_features'])
-
-                if self.visualize or self.kd_flag:
-                    projected_lidar_stack.append(selected_cav_processed['projected_lidar'])
-                    projected_lidar_stack.append(selected_inf_processed['projected_lidar'])
-
+                    projected_lidar_stack.append(
+                        selected_cav_processed['projected_lidar'])
+                
                 if self.supervise_single: # 用于监督单车检测结果用的，比如说where2comm就这样做
                     # single_label_list.append(selected_cav_processed['single_label_dict'])
                     single_object_bbx_center_list.append(selected_cav_processed['single_object_bbx_center'])
-                    single_object_bbx_center_list.append(selected_inf_processed['single_object_bbx_center'])
                     single_object_bbx_mask_list.append(selected_cav_processed['single_object_bbx_mask'])
-                    single_object_bbx_mask_list.append(selected_inf_processed['single_object_bbx_mask'])
 
             # generate single view GT label
             if self.supervise_single:

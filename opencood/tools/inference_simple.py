@@ -196,14 +196,13 @@ def main():
             elif opt.fusion_method == 'no':
                 infer_result = inference_utils.inference_no_fusion_simple(batch_data,
                                                                 model,
-                                                                opencood_dataset,
-                                                                metric)
+                                                                opencood_dataset)
             elif opt.fusion_method == 'no_w_uncertainty':
                 infer_result = inference_utils.inference_no_fusion_w_uncertainty(batch_data,
                                                                 model,
                                                                 opencood_dataset)
             elif opt.fusion_method == 'single':
-                infer_result = inference_utils.inference_no_fusion(batch_data,
+                infer_result = inference_utils.inference_no_fusion_simple(batch_data,
                                                                 model,
                                                                 opencood_dataset,
                                                                 single_gt=True)

@@ -89,7 +89,7 @@ class Transformer(nn.Module):
         out_logits, out_ref_windows = self.proposal_head(enc_embed, ref_windows)
 
         out_probs = out_logits[..., 0].sigmoid()
-        topk_probs, indexes = torch.topk(out_probs, self.num_queries + self.extra_query_num, dim=1, sorted=False)
+        topk_probs, indexes = torch.topk(out_probs, self.num_queries + self.extra_query_num, dim=1, sorted=True)
         topk_probs = topk_probs.unsqueeze(-1)
         indexes = indexes.unsqueeze(-1)
 
@@ -142,7 +142,6 @@ class Transformer(nn.Module):
 
         memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors) # BoxAttention 提取特征 结果为(B_n, H*W, 256)
         query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors) # 返回None，None，(B_n, query_num+extra_num, 8)，(B_n, query_num+extra_num, 1)
-
         ego_topk_proposals = topk_proposals[:, :self.num_queries, :] # (B_n, query_num, 8)
         ego_topk_indexes = topk_indexes[:, :self.num_queries, :] # (B_n, query_num, 1)
         extra_topk_proposals = topk_proposals[:, self.num_queries:, :]  # (B_n, extra_num, 8)

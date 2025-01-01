@@ -547,7 +547,7 @@ def getLateFusionDataset(cls):
         def post_process_no_fusion(self, data_dict, output_dict_ego):
             data_dict_ego = OrderedDict()
             data_dict_ego["ego"] = data_dict["ego"]
-            gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
+            gt_box_tensor = self.post_processor.generate_gt_bbx_by_iou(data_dict)
 
             pred_box_tensor, pred_score = self.post_processor.post_process(
                 data_dict_ego, output_dict_ego

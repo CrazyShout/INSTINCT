@@ -196,9 +196,9 @@ def inference_no_fusion_simple(batch_data, model, dataset, single_gt=False, metr
         else, use all agent's merged labels.
     """
     output_dict_ego = OrderedDict()
+  
     if single_gt:
         batch_data = {'ego': batch_data['ego']} # single的话就只看ego自己范围内的gt
-        
     output_dict_ego['ego'] = model(batch_data['ego']) # 只输入ego的信息
     # output_dict only contains ego
     # but batch_data havs all cavs, because we need the gt box inside.

@@ -554,10 +554,10 @@ class Transformer(nn.Module):
         self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
         self.trans_adapter = TransAdapt(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         # self.query_fusion = AttenQueryFusion(d_model)
-        # self.ref_fusion = AttenQueryFusion(7)
+        # self.ref_fusion = AttenQueryFusion(8)
         self.query_fusion = SimpleGatingFusion()
         self.ref_fusion = BoxGatingFusion()
-
+        self.debug = 0
         decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
 
@@ -592,9 +592,10 @@ class Transformer(nn.Module):
         out_logits, out_ref_windows = self.proposal_head(enc_embed, ref_windows)
 
         out_probs = out_logits[..., 0].sigmoid()
-        topk_probs, indexes = torch.topk(out_probs, self.num_queries + self.extra_query_num, dim=1, sorted=False)
+        topk_probs, indexes = torch.topk(out_probs, self.num_queries + self.extra_query_num, dim=1, sorted=True)
         topk_probs = topk_probs.unsqueeze(-1)
         indexes = indexes.unsqueeze(-1)
+        # print("out_probs  is ", [round(x, 3) for x in out_probs[0][:1000].tolist()])
 
         out_ref_windows = torch.gather(out_ref_windows, 1, indexes.expand(-1, -1, out_ref_windows.shape[-1]))
         out_ref_windows = torch.cat(
@@ -645,7 +646,8 @@ class Transformer(nn.Module):
 
         memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors) # BoxAttention 提取特征 结果为(B_n, H*W, 256)
         query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors) # 返回None，None，(B_n, query_num+extra_num, 8)，(B_n, query_num+extra_num, 1)
-
+        # print("topk_indexes first is ", topk_indexes[0].tolist())
+        # print("memory shape is ", memory.shape)
         ego_topk_proposals = topk_proposals[:, :self.num_queries, :] # (B_n, query_num, 8)
         ego_topk_indexes = topk_indexes[:, :self.num_queries, :] # (B_n, query_num, 1)
         extra_topk_proposals = topk_proposals[:, self.num_queries:, :]  # (B_n, extra_num, 8)
@@ -699,7 +701,10 @@ class Transformer(nn.Module):
             memory_mask_b = memory_mask_batch_lst[bid] # (N, 1, H, W)
             t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
             t_matrix_ref = pairwise_t_matrix_ref[bid][:N, :N, :, :] # (N, N, 4, 4)
-
+            # print("bid is ", bid)
+            # print("record_len is ", record_len)
+            # print("memory_discrete_b shape is ", memory_discrete_b.shape)
+            # print("t_matrix shape is ", t_matrix.shape)
             neighbor_memory = warp_affine_simple(memory_discrete_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, C, H, W)
             ref_boxes_trans_b = warp_affine_simple(ref_boxes_trans_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 7, H, W)
             neighbor_memory_mask = warp_affine_simple(memory_mask_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 1, H, W)
@@ -784,7 +789,13 @@ class Transformer(nn.Module):
         fused_indicies = torch.cat(fused_indicies, dim=0) # (B, query_num+extra_num, 1)
         fused_ref_windows = torch.cat(fused_ref_windows, dim=0) # (B, query_num+extra_num, 8)
         ego_features = torch.cat(ego_features, dim=0) # (B, HW, C)
-
+        # print("fused_indicies first is ", fused_indicies[0].tolist())
+        # print("ego_topk_indexes is ", ego_topk_indexes[0].tolist())
+        # print("record_query_num is ", record_query_num)
+        # if self.debug < 100:
+        #     self.debug += 1
+        # else:
+        #     xxx
         # 加噪声gt，准备一起参与decoder训练去噪
         if noised_gt_box is not None:
             noised_gt_proposals = torch.cat(

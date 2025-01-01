@@ -1,4 +1,4 @@
-name: dair_where2comm_max_multiscale_resnet
+name: dair_where2comm_max_multiscale_resnet_w_com
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -133,11 +133,11 @@ model:
       n_head: 8
       dropout_rate: 0
       only_attention: true
-      # communication:
-      #   thre: 0.01
-      #   gaussian_smooth:
-      #     k_size: 5
-      #     c_sigma: 1.0
+      communication:
+        thre: 0.01
+        gaussian_smooth:
+          k_size: 5
+          c_sigma: 1.0
       agg_operator:
         mode: 'MAX'
         feature_dim: 256

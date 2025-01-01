@@ -27,15 +27,15 @@ class DataBaseSampler(object):
 
         self.use_shared_memory = sampler_cfg.get('USE_SHARED_MEMORY', False)
 
-        for db_info_path in sampler_cfg['DB_INFO_PATH']:
+        for db_info_path in sampler_cfg['DB_INFO_PATH']: # dairv2x_dbinfos_fusion.pkl
             db_info_path = os.path.join(self.root_path, db_info_path) #self.root_path.resolve() / db_info_path
 
             with open(str(db_info_path), 'rb') as f:
                 infos = pickle.load(f)
-                [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names]
+                [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names] # 每一个class对应的infos获取到
 
         for func_name, val in sampler_cfg['PREPARE'].items():
-            self.db_infos = getattr(self, func_name)(self.db_infos, val)
+            self.db_infos = getattr(self, func_name)(self.db_infos, val) # 过滤要求点数大于5
 
         self.gt_database_data_key = self.load_db_to_shared_memory() if self.use_shared_memory else None
 
@@ -47,15 +47,15 @@ class DataBaseSampler(object):
         if self.painting:
             self.detection_mapping = {'Car': 1}
 
-        for x in sampler_cfg['SAMPLE_GROUPS']:
+        for x in sampler_cfg['SAMPLE_GROUPS']: # ['Car:15']
             class_name, sample_num = x.split(':')
             if class_name not in class_names:
                 continue
             self.sample_class_num[class_name] = sample_num # {Car:15}
             self.sample_groups[class_name] = {
                 'sample_num': sample_num,
-                'pointer': len(self.db_infos[class_name]),
-                'indices': np.arange(len(self.db_infos[class_name]))
+                'pointer': len(self.db_infos[class_name]), # 有多少个满足要求的gt
+                'indices': np.arange(len(self.db_infos[class_name])) # 索引
             }
 
     # def __getstate__(self):
@@ -133,7 +133,6 @@ class DataBaseSampler(object):
         if pointer >= len(self.db_infos[class_name]):
             indices = np.random.permutation(len(self.db_infos[class_name]))
             pointer = 0
-
         sampled_dict = [self.db_infos[class_name][idx] for idx in indices[pointer: pointer + sample_num]] # 随机采样十五个
         pointer += sample_num
         sample_group['pointer'] = pointer
@@ -393,7 +392,7 @@ class DataBaseSampler(object):
                 #file_path = self.root_path / info['path']
 
                 obj_points = np.fromfile(str(file_path), dtype=np.float32).reshape(
-                    [-1, self.sampler_cfg['NUM_POINT_FEATURES']])
+                    [-1, self.sampler_cfg['NUM_POINT_FEATURES']]) # (n, 4) 这是取出来一个gt对应的点云
                 if self.painting:
                     class_name = info['name']
                     assert class_name in list(self.detection_mapping.keys()),"class name not exist!"
@@ -403,8 +402,8 @@ class DataBaseSampler(object):
                 if obj_points.shape[0] != info['num_points_in_gt']:
                     obj_points = np.fromfile(str(file_path), dtype=np.float64).reshape(-1, self.sampler_cfg['NUM_POINT_FEATURES'])
 
-            assert obj_points.shape[0] == info['num_points_in_gt']
-            obj_points[:, :3] += info['box3d_lidar'][:3].astype(np.float32)
+            assert obj_points.shape[0] == info['num_points_in_gt'] # 实际的点个数必须和infos中记录的一致
+            obj_points[:, :3] += info['box3d_lidar'][:3].astype(np.float32) # 原来是做了去中心化，这里恢复
 
             if self.sampler_cfg.get('USE_ROAD_PLANE', False):
                 # mv height
@@ -415,9 +414,9 @@ class DataBaseSampler(object):
             #         img_aug_gt_dict, info, data_dict, obj_points, sampled_gt_boxes, sampled_gt_boxes2d, idx
             #     )
 
-            obj_points_list.append(obj_points)
+            obj_points_list.append(obj_points) # 每一个采样来的gt的点云都存到list中
 
-        obj_points = np.concatenate(obj_points_list, axis=0)
+        obj_points = np.concatenate(obj_points_list, axis=0) # (n_all, 4)
         sampled_gt_names = np.array([x['name'] for x in total_valid_sampled_dict])
 
         if self.sampler_cfg.get('FILTER_OBJ_POINTS_BY_TIMESTAMP', False) or obj_points.shape[-1] != points.shape[-1]:
@@ -434,10 +433,10 @@ class DataBaseSampler(object):
 
         large_sampled_gt_boxes = box_utils.enlarge_box3d(
             sampled_gt_boxes[:, 0:7], extra_width=self.sampler_cfg['REMOVE_EXTRA_WIDTH']
-        )
-        points = box_utils.remove_points_in_boxes3d(points, large_sampled_gt_boxes)
-        points = np.concatenate([obj_points[:, :points.shape[-1]], points], axis=0)
-        gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_gt_boxes], axis=0)
+        ) # 额外缩放一下gt，这里默认是不放大
+        points = box_utils.remove_points_in_boxes3d(points, large_sampled_gt_boxes) # 原始点云中对应区域的点云给移除
+        points = np.concatenate([obj_points[:, :points.shape[-1]], points], axis=0) # sample来的点云和原始点云拼接在一起  (N, 4)
+        gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_gt_boxes], axis=0) # gt boxes也拼接在一起 (N, 7)
 
         gt_boxes[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
         gt_mask[:gt_boxes_valid.shape[0]] = 1
@@ -474,24 +473,24 @@ class DataBaseSampler(object):
             if self.limit_whole_scene:
                 num_gt =  gt_mask,sum() #np.sum(class_name == gt_names)
                 sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
-            if int(sample_group['sample_num']) > 0:
+            if int(sample_group['sample_num']) > 0: # 15 即要采样的个数
                 sampled_dict = self.sample_with_fixed_number(class_name, sample_group) # [Dicrt1, Dict2...]采样固定个数的gt，默认是15个
                 
-                # 我们在生成gt base的时候是用的lwh的顺序载入的，因此如果实际是hwl（比如之前的基线），那就要在读出来的时候给它调整回去
+                # 我们在生成gt base的时候是用的lwh的顺序载入的，因此如果实际是hwl（比如之前的baseline），那就要在读出来的时候给它调整回去
                 if self.sampler_cfg['BOX_ORDER'] == 'hwl':
                     #change the order from 'lwh' to 'hwl'
                     for dict in sampled_dict:
                         dict['box3d_lidar'][[5,4,3]] = dict['box3d_lidar'][[3,4,5]]
 
-                sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32) # (15, 7)
+                sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32) # (15, 7) 采样得到的15个gt
 
                 assert not self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False), 'Please use latest codes to generate GT_DATABASE'
 
                 iou1 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], existed_boxes[:, 0:7]) # (15, n)
                 iou2 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], sampled_boxes[:, 0:7]) # (15, 15)
-                iou2[range(sampled_boxes.shape[0]), range(sampled_boxes.shape[0])] = 0
+                iou2[range(sampled_boxes.shape[0]), range(sampled_boxes.shape[0])] = 0 # 对角线上的iou不用考虑
                 iou1 = iou1 if iou1.shape[1] > 0 else iou2
-                valid_mask = ((iou1.max(axis=1) + iou2.max(axis=1)) == 0) # 完全没有重叠的部分（和gt以及自身）会被设置为True （15，）这也就是说不能和原来场景里的重合
+                valid_mask = ((iou1.max(axis=1) + iou2.max(axis=1)) == 0) # 完全没有重叠的部分（和gt以及自身）会被设置为True （15，）这也就是说不能和原来场景里的重合同时也不能相互重叠
 
                 if self.img_aug_type is not None:
                     sampled_boxes2d, mv_height, valid_mask = self.sample_gt_boxes_2d(data_dict, sampled_boxes, valid_mask)
@@ -503,12 +502,12 @@ class DataBaseSampler(object):
                 valid_sampled_dict = [sampled_dict[x] for x in valid_mask]
                 valid_sampled_boxes = sampled_boxes[valid_mask]
 
-                existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes[:, :existed_boxes.shape[-1]]), axis=0)
+                existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes[:, :existed_boxes.shape[-1]]), axis=0) # 更新 gt 增加了采样得到的gt
                 total_valid_sampled_dict.extend(valid_sampled_dict)
 
-        sampled_gt_boxes = existed_boxes[gt_boxes_valid.shape[0]:, :]
+        sampled_gt_boxes = existed_boxes[gt_boxes_valid.shape[0]:, :] # 将补充插入的gt选出来
 
-        if total_valid_sampled_dict.__len__() > 0:
+        if total_valid_sampled_dict.__len__() > 0: # 存在要插入的gt
             sampled_gt_boxes2d = np.concatenate(sampled_gt_boxes2d, axis=0) if len(sampled_gt_boxes2d) > 0 else None
             sampled_mv_height = np.concatenate(sampled_mv_height, axis=0) if len(sampled_mv_height) > 0 else None
 

@@ -400,6 +400,119 @@ class VoxelPostprocessor(BasePostprocessor):
 
         return pred_box3d_tensor, scores
 
+    def post_process_no_anchor(self, data_dict, output_dict):
+        """
+        Process the outputs of the model to 2D/3D bounding box.
+        Step1: convert each cav's output to bounding box format
+        Step2: project the bounding boxes to ego space.
+        Step:3 NMS
+
+        For early and intermediate fusion,
+            data_dict only contains ego.
+
+        For late fusion,
+            data_dcit contains all cavs, so we need transformation matrix.
+
+
+        Parameters
+        ----------
+        data_dict : dict
+            The dictionary containing the origin input data of model.
+
+        output_dict :dict
+            The dictionary containing the output of the model.
+
+        Returns
+        -------
+        pred_box3d_tensor : torch.Tensor
+            The prediction bounding box tensor after NMS.
+        gt_box3d_tensor : torch.Tensor
+            The groundtruth bounding box tensor.
+        """
+        # the final bounding box list
+        pred_box3d_list = []
+        pred_box2d_list = []
+        for cav_id, cav_content in data_dict.items():
+            assert cav_id in output_dict
+            # the transformation matrix to ego space
+            transformation_matrix = cav_content['transformation_matrix'] # no clean
+
+            # classification probability
+            prob = output_dict[cav_id]['pred_scores'] # (n, )
+
+            # regression map
+            reg = output_dict[cav_id]['pred_boxes'] # (n, 7)
+
+            boxes3d = reg
+            scores = prob
+
+            # convert output to bounding box
+            if len(boxes3d) != 0:
+                # (N, 8, 3)
+                boxes3d_corner = \
+                    box_utils.boxes_to_corners_3d(boxes3d,
+                                                  order=self.params['order'])
+                
+                # STEP 2
+                # (N, 8, 3)
+                projected_boxes3d = \
+                    box_utils.project_box3d(boxes3d_corner,
+                                            transformation_matrix)
+                # convert 3d bbx to 2d, (N,4)
+                projected_boxes2d = \
+                    box_utils.corner_to_standup_box_torch(projected_boxes3d)
+                # (N, 5)
+                boxes2d_score = \
+                    torch.cat((projected_boxes2d, scores.unsqueeze(1)), dim=1)
+
+                pred_box2d_list.append(boxes2d_score)
+                pred_box3d_list.append(projected_boxes3d)
+
+        if len(pred_box2d_list) ==0 or len(pred_box3d_list) == 0:
+            return None, None
+        # shape: (N, 5)
+        pred_box2d_list = torch.vstack(pred_box2d_list)
+        # scores
+        scores = pred_box2d_list[:, -1]
+        # predicted 3d bbx
+        pred_box3d_tensor = torch.vstack(pred_box3d_list)
+        # remove large bbx
+        # # keep_index_1 = box_utils.remove_large_pred_bbx(pred_box3d_tensor)
+        # keep_index_2 = box_utils.remove_bbx_abnormal_z(pred_box3d_tensor)
+        # keep_index_1 = keep_index_2 # 较大的bbx 先不移除
+        # keep_index = torch.logical_and(keep_index_1, keep_index_2)
+
+        # pred_box3d_tensor = pred_box3d_tensor[keep_index]
+        # scores = scores[keep_index]
+
+        # STEP3
+        # nms
+        keep_index = box_utils.nms_rotated(pred_box3d_tensor,
+                                           scores,
+                                           self.params['nms_thresh']
+                                           )
+        # print("self.params['nms_thresh'] is ", self.params['nms_thresh'])
+        # print("self.params['gt_range'] is ", self.params['gt_range'])
+        # print("self.params['order'] is ", self.params['order'])
+        # xxx
+        pred_box3d_tensor = pred_box3d_tensor[keep_index]
+
+        # select cooresponding score
+        scores = scores[keep_index]
+        
+        # filter out the prediction out of the range. with z-dim
+        pred_box3d_np = pred_box3d_tensor.cpu().numpy()
+        pred_box3d_np, mask = box_utils.mask_boxes_outside_range_numpy(pred_box3d_np,
+                                                    self.params['gt_range'],
+                                                    order=None,
+                                                    return_mask=True)
+        pred_box3d_tensor = torch.from_numpy(pred_box3d_np).to(device=pred_box3d_tensor.device)
+        scores = scores[mask]
+
+        assert scores.shape[0] == pred_box3d_tensor.shape[0]
+
+        return pred_box3d_tensor, scores
+
     @staticmethod
     def delta_to_boxes3d(deltas, anchors):
         """
