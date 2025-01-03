@@ -55,14 +55,14 @@ data_augment:
     LIMIT_WHOLE_SCENE: False
     BOX_ORDER: 'lwh'
 
-  # - NAME: random_world_flip
-  #   ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
 
-  # - NAME: random_world_rotation
-  #   WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
 
-  # - NAME: random_world_scaling
-  #   WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
 
 # anchor box related
 postprocess:

@@ -12,6 +12,10 @@ from datetime import datetime
 import shutil
 import torch
 import torch.optim as optim
+import torch.nn as nn
+import numpy as np
+from functools import partial
+from .fastai_optim import OptimWrapper
 
 def backup_script(full_path, folders_to_save=["models", "data_utils", "utils", "loss"]):
     target_folder = os.path.join(full_path, 'scripts')
@@ -199,7 +203,7 @@ def setup_optimizer(hypes, model):
     method_dict = hypes['optimizer']
     optimizer_method = getattr(optim, method_dict['core_method'], None)
     # 获取 initial_lr 和 lr 的值
-    lr = method_dict['lr']  # initial learning rate
+    lr = method_dict.get('initial_lr', 0.001)  # initial learning rate
     initial_lr = method_dict.get('initial_lr', lr)  # 如果没有指定 initial_lr，则使用 lr 作为初始学习率
     # 下面的都是用在oneCycle策略中的
     # max_lr = method_dict.get('max_lr', lr)
@@ -207,18 +211,32 @@ def setup_optimizer(hypes, model):
     # max_momentum = method_dict.get('max_momentum', 0.95)  
     # base_momentum = method_dict.get('base_momentum', 0.85)
 
-    if not optimizer_method:
+    if not optimizer_method and method_dict['core_method'] != 'adam_onecycle':
         raise ValueError('{} is not supported'.format(method_dict['name']))
-    if 'args' in method_dict:
+    if 'args' in method_dict and method_dict['core_method'] != 'adam_onecycle':
         optimizer = optimizer_method(model.parameters(),
                                 lr=lr,
                                 **method_dict['args'])
+    elif method_dict['core_method'] == 'adam_onecycle':
+        def children(m: nn.Module):
+            return list(m.children())
+
+        def num_children(m: nn.Module) -> int:
+            return len(children(m))
+
+        flatten_model = lambda m: sum(map(flatten_model, m.children()), []) if num_children(m) else [m]
+        get_layer_groups = lambda m: [nn.Sequential(*flatten_model(m))]
+
+        optimizer_func = partial(optim.Adam, betas=(0.9, 0.99))
+        optimizer = OptimWrapper.create(
+            optimizer_func, 3e-3, get_layer_groups(model), wd=method_dict['args']['weight_decay'], true_wd=True, bn_wd=True
+        )
     else:
         optimizer = optimizer_method(model.parameters(),
                                 lr=lr)
     # 确保每个 param_group 都有参数
-    for param_group in optimizer.param_groups:
-        param_group['initial_lr'] = initial_lr
+    # for param_group in optimizer.param_groups:
+    #     param_group['initial_lr'] = initial_lr
         # param_group['max_lr'] = max_lr  # 添加 max_lr
         # param_group['min_lr'] = min_lr
         # param_group['max_momentum'] = max_momentum  # 添加 max_momentum
@@ -226,7 +244,7 @@ def setup_optimizer(hypes, model):
     return optimizer
 
 
-def setup_lr_schedular(hypes, optimizer, init_epoch=None):
+def setup_lr_schedular(hypes, optimizer, init_epoch=None, total_iters_each_epoch=None):
     """
     Set up the learning rate schedular.
 
@@ -260,7 +278,12 @@ def setup_lr_schedular(hypes, optimizer, init_epoch=None):
         max_lr = lr_schedule_config['max_lr']
         fade_in_ratio = lr_schedule_config['fade_in_ratio']
         fade_out_ratio = lr_schedule_config['fade_out_ratio']
-        scheduler = FadeScheduler(optimizer, max_lr, total_epoches, fade_in_ratio, fade_out_ratio, last_epoch)    
+        scheduler = FadeScheduler(optimizer, max_lr, total_epoches, fade_in_ratio, fade_out_ratio, last_epoch)
+    elif lr_schedule_config['core_method'] == 'onecycle':
+        total_steps = total_iters_each_epoch * hypes['train_params']['epoches'] # 总训练样本数
+        scheduler = OneCycle(
+            optimizer, total_steps, lr_schedule_config['max_lr'], lr_schedule_config['moms'], lr_schedule_config['div_factor'], lr_schedule_config['pct_start']
+        )
     else:
         from torch.optim.lr_scheduler import ExponentialLR
         gamma = lr_schedule_config['gamma']
@@ -325,3 +348,79 @@ class FadeScheduler(_LRScheduler):
         else:
             # 保持阶段：维持在end_lr
             return [self.end_lr for base_lr in self.base_lrs]
+        
+class LRSchedulerStep(object):
+    def __init__(self, fai_optimizer: OptimWrapper, total_step, lr_phases,
+                 mom_phases):
+        # if not isinstance(fai_optimizer, OptimWrapper):
+        #     raise TypeError('{} is not a fastai OptimWrapper'.format(
+        #         type(fai_optimizer).__name__))
+        self.optimizer = fai_optimizer
+        self.total_step = total_step
+        self.lr_phases = []
+
+        # self.lr_phases 加入了两个元素，表示两个阶段，每个阶段有(开始iters, 结束iters, lambda函数)
+        for i, (start, lambda_func) in enumerate(lr_phases): # 学习率的每个阶段
+            if len(self.lr_phases) != 0:
+                assert self.lr_phases[-1][0] < start
+            if isinstance(lambda_func, str):
+                lambda_func = eval(lambda_func)
+            if i < len(lr_phases) - 1:
+                self.lr_phases.append((int(start * total_step), int(lr_phases[i + 1][0] * total_step), lambda_func))
+            else:
+                self.lr_phases.append((int(start * total_step), total_step, lambda_func))
+        assert self.lr_phases[0][0] == 0 # 必须是从头开始
+        self.mom_phases = []
+        for i, (start, lambda_func) in enumerate(mom_phases):
+            if len(self.mom_phases) != 0:
+                assert self.mom_phases[-1][0] < start
+            if isinstance(lambda_func, str):
+                lambda_func = eval(lambda_func)
+            if i < len(mom_phases) - 1:
+                self.mom_phases.append((int(start * total_step), int(mom_phases[i + 1][0] * total_step), lambda_func))
+            else:
+                self.mom_phases.append((int(start * total_step), total_step, lambda_func))
+        assert self.mom_phases[0][0] == 0
+
+    def step(self, step):
+        for start, end, func in self.lr_phases:
+            if step >= start:
+                self.optimizer.lr = func((step - start) / (end - start))
+        for start, end, func in self.mom_phases:
+            if step >= start:
+                self.optimizer.mom = func((step - start) / (end - start))
+
+
+def annealing_cos(start, end, pct):
+    # print(pct, start, end)
+    "Cosine anneal from `start` to `end` as pct goes from 0.0 to 1.0."
+    cos_out = np.cos(np.pi * pct) + 1
+    return end + (start - end) / 2 * cos_out
+
+
+class OneCycle(LRSchedulerStep):
+    def __init__(self, fai_optimizer, total_step, lr_max, moms, div_factor,
+                 pct_start):
+        '''
+        fai_optimizer: 优化器对象
+        total_step: 训练总样本数 = epochs * iters_per_epoch
+        lr_max: 最大学习率 0.002
+        moms: [ 0.95, 0.85 ]
+        div_factor: 10 初始学习率和最高学习率的比例
+        pct_start: 0.4 上升阶段的比例
+        '''
+        self.lr_max = lr_max
+        self.moms = moms
+        self.div_factor = div_factor
+        self.pct_start = pct_start
+        a1 = int(total_step * self.pct_start) # 上升阶段占据0.4
+        a2 = total_step - a1
+        low_lr = self.lr_max / self.div_factor # 这个应该是用于作为初始学习率
+        lr_phases = ((0, partial(annealing_cos, low_lr, self.lr_max)),
+                     (self.pct_start,
+                      partial(annealing_cos, self.lr_max, low_lr / 1e4)))
+        mom_phases = ((0, partial(annealing_cos, *self.moms)),
+                      (self.pct_start, partial(annealing_cos,
+                                               *self.moms[::-1])))
+        fai_optimizer.lr, fai_optimizer.mom = low_lr, self.moms[0]
+        super().__init__(fai_optimizer, total_step, lr_phases, mom_phases)

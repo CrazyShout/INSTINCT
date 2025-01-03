@@ -191,9 +191,12 @@ class CQCPHead(nn.Module):
             activation=activation, # gelu
             num_queries=self.num_queries, # 1000
             num_classes=num_class, # 3
-            cp_flag=cp_flag # True
+            cp_flag=cp_flag, # True
+            box_encode_func=self.encode_bbox,
+            box_decode_func=self.decode_bbox,
+            get_sparse_features_func = self.get_sparse_features
         )
-
+        self.sample_idx = 0
         self.transformer.proposal_head = Det3DHead(
             self.hidden_channel,
             code_size=self.code_size,
@@ -267,7 +270,7 @@ class CQCPHead(nn.Module):
         record_len = batch_dict['record_len'] # 举个例子，batch size == 4时，形如List[2, 2, 2, 2]，表示每个场景样本下的agent数目为2，即一车一路
         batch_size = len(record_len)
         pairwise_t_matrix = batch_dict['pairwise_t_matrix'] # (B_N, L, L, 4, 4)
-        Bn, C, H, W = spatial_features_2d.shape # Bn = 2*B 因为每个场景下都有2个agent
+        Bn, C, H, W = spatial_features_2d.shape # Bn <= 2*B 因为每个场景下都有2个agent
         pairwise_t_matrix_ref = copy.deepcopy(pairwise_t_matrix) # 用于参考框的变换
         # (B,L,L,2,3)
         pairwise_t_matrix = pairwise_t_matrix[:,:,:,[0, 1],:][:,:,:,:,[0, 1, 3]] # [B, L, L, 2, 3]
@@ -320,6 +323,22 @@ class CQCPHead(nn.Module):
             input_query_bbox = input_query_label = attn_mask = dn_meta = None
             targets = None
 
+        gt_boxes_single = batch_dict['object_bbx_center_single'] # B, maxnum, 7
+        gt_boxes_mask_single = batch_dict['object_bbx_mask_single'] # B, maxnum
+
+        targets_single = list() # 列表存放每个样本的标签
+        valid_bboxes_single = list()
+        for batch_idx in range(Bn):
+            target_single = {}
+            gt_bboxes_single = gt_boxes_single[batch_idx] # (maxnum, 7)
+            gt_bboxes_mask_single = gt_boxes_mask_single[batch_idx] # (maxnum, )
+            valid_box_single = gt_bboxes_single[gt_bboxes_mask_single.bool()] # （n_idx, 7）
+            valid_bboxes_single.append(valid_box_single.to(torch.float32))
+            # gt_labels_single = torch.ones(valid_box_single.size(0), device=valid_box_single.device, dtype=valid_box_single.dtype)
+            # target_single['gt_boxes'] = self.encode_bbox(valid_box_single) # 给gt box做好归一化工作
+            # target_single['labels'] = gt_labels_single.long() - 1 # (n_idx, )
+            # targets_single.append(target_single)
+
         outputs = self.transformer(
             features, # [(B, 256, H, W)]
             pos_encodings, # [(B, 256, H, W)]
@@ -327,11 +346,10 @@ class CQCPHead(nn.Module):
             input_query_label, # (B, pad_size, num_classes) num_classes=1
             attn_mask, # (1000+pad_size, 1000+pad_size)
             targets=targets, # [Sample1:Dict, Sample2:Dict...]
+            valid_bboxes_single = valid_bboxes_single,
             record_len=record_len,
             pairwise_t_matrix=pairwise_t_matrix,
             pairwise_t_matrix_ref=pairwise_t_matrix_ref,
-            box_encode_func=self.encode_bbox,
-            box_decode_func=self.decode_bbox
         )
         '''
         hidden_state: (3, B, pad_size + all_query_num + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是Decoder layer每一层的query
@@ -576,7 +594,7 @@ class CQCPHead(nn.Module):
             # boxes = boxes[(boxes[:, 3] > 0) & (boxes[:, 4] > 0)] # 这筛选出有效的部分
             ones = torch.ones_like(boxes[:, 0:1]) # (n_i, 1)
             bev_boxes = torch.cat([boxes[:, 0:2], ones * 0.5, boxes[:, 3:5], ones * 0.5, boxes[:, 6:7]], dim=-1) # 去除z轴，全部填充0.5 (n_i, 7)
-            bev_boxes[:, 0:2] -= pc_range[0:2] # 减去边界最小值 得到相对偏移
+            bev_boxes[:, 0:2] -= pc_range[0:2] # 减去边界最小值 得到相对偏移 其实相当于将坐标原点移动到左上角
             bev_boxes[:, 0:2] /= stride # 得到在特征图中的位置
             bev_boxes[:, 3:5] /= stride # 得到在特征图中的长宽
 
@@ -728,6 +746,92 @@ class CQCPHead(nn.Module):
             pred_boxes[:, 7] = (pred_boxes[:, 7]) * (self.point_cloud_range[3] - self.point_cloud_range[0])
             pred_boxes[:, 8] = (pred_boxes[:, 8]) * (self.point_cloud_range[4] - self.point_cloud_range[1])
         return pred_boxes
+
+    def get_sparse_features(self, dense_features, bboxes_3d):
+        '''
+        dense_features: (B, C, H, W)
+        bboxes_3d: [(n1, 7), (n2, 7)...] 训练时直接就用GT来生成稀疏特征
+        '''
+        bboxes_3d = copy.deepcopy(bboxes_3d)
+        grid_size = torch.ceil(torch.from_numpy(self.grid_size).to(bboxes_3d[0]) / self.feature_map_stride) # 空间八倍下采样后的尺寸 [252, 100, 50/8]
+        pc_range = torch.from_numpy(np.array(self.point_cloud_range)).to(bboxes_3d[0]) # [-100.8, -40, -3.5, 100.8, 40, 1.5] 点云尺寸
+        stride = (pc_range[3:5] - pc_range[0:2]) / grid_size[0:2] # 实际尺寸和特征图的差距
+        gt_score_map = list()
+        yy, xx = torch.meshgrid(torch.arange(grid_size[1]), torch.arange(grid_size[0])) # 两个都是（100， 252）
+        points = torch.stack([yy, xx]).permute(1, 2, 0).flip(-1) # (100, 252, 2) 最后一个反转操作将存储方法设置为(x,y)格式
+        points = torch.cat([points, torch.ones_like(points[..., 0:1]) * 0.5], dim=-1).reshape([-1, 3]) # （100*252， 3）新增的维度里面存的都是0.5 也就是z轴坐标都是0.5
+        # print("len(bboxes_3d) is ", len(bboxes_3d))
+        # print("dense_features.shape is ", dense_features.shape)
+        assert len(bboxes_3d) == dense_features.size(0)
+        for i in range(len(bboxes_3d)):
+            boxes = bboxes_3d[i] # (n_i, 7)
+            # boxes = boxes[(boxes[:, 3] > 0) & (boxes[:, 4] > 0)] # 这筛选出有效的部分
+            ones = torch.ones_like(boxes[:, 0:1]) # (n_i, 1)
+            bev_boxes = torch.cat([boxes[:, 0:2], ones * 0.5, boxes[:, 3:5], ones * 0.5, boxes[:, 6:7]], dim=-1) # 去除z轴，全部填充0.5 (n_i, 7)
+            bev_boxes[:, 0:2] -= pc_range[0:2] # 减去边界最小值 得到相对偏移 其实相当于将坐标原点移动到左上角
+            # print("1: l and w is ", bev_boxes[:, 3:5])
+            bev_boxes[:, 0:2] /= stride # 得到在特征图中的位置
+            bev_boxes[:, 3:5] /= stride # 得到在特征图中的长宽
+            # print("2: l and w is ", bev_boxes[:, 3:5])
+            bev_boxes[:, 3:5] += 1 # 扩大bbx的范围，获取更多环境信息
+            # print("3: l and w is ", bev_boxes[:, 3:5])
+            box_ids = roiaware_pool3d_utils.points_in_boxes_gpu(
+                points[:, 0:3].unsqueeze(dim=0).float().cuda(), # （1， HW， 3）
+                bev_boxes[:, 0:7].unsqueeze(dim=0).float().cuda() # （1, n_i, 7）
+            ).long().squeeze(dim=0).cpu().numpy() # (1, HW) 不等于-1的部分就是没有落在任何一个box中
+            box_ids = box_ids.reshape([grid_size[1].long(), grid_size[0].long()]) # (100, 252) 
+            mask = torch.from_numpy(box_ids != -1).to(bev_boxes) # (100, 252) 
+            gt_score_map.append(mask)
+        gt_score_map = torch.stack(gt_score_map) # (B, 100, 252) 在box的部分被标记为True
+        # print("stride is ", stride)
+        # num_pos = gt_score_map.eq(1).float().sum().item() # max保证至少为1，这是算所有位置的个数，也就是所有前景点的个数
+        
+        B, C, H, W = dense_features.shape
+        # print("gt_score_map.shape is ", gt_score_map.shape)
+        assert gt_score_map.size(1) == H and gt_score_map.size(2) == W
+        gt_score_map = gt_score_map.unsqueeze(1).expand(B, C, H, W)
+
+        sparse_features = gt_score_map * dense_features
+                
+        # import matplotlib.pyplot as plt
+        # import os
+        # if self.sample_idx % 20 == 0:
+        #     save_dir = "./feature_visualizations"
+        #     os.makedirs(save_dir, exist_ok=True)
+        #     for b in range(B):
+        #         feature_map = dense_features[b]
+        #         feature_map_sparse = sparse_features[b]
+        #         feature_map = feature_map.mean(dim=0)
+        #         feature_map_sparse = feature_map_sparse.mean(dim=0)
+
+
+        #         # 将特征图归一化到 [0, 255]
+        #         def normalize_to_image(tensor):
+        #             tensor = tensor - tensor.min()
+        #             tensor = tensor / tensor.max()
+        #             return (tensor * 255).byte()
+                
+        #         dense_feature = normalize_to_image(feature_map)
+        #         sparse_feature = normalize_to_image(feature_map_sparse)
+
+        #         # 转为 NumPy 格式
+        #         dense_feature_np = dense_feature.cpu().numpy()
+        #         sparse_feature_np = sparse_feature.cpu().numpy()
+
+        #         # 创建可视化画布
+        #         fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+        #         axes[0].imshow(dense_feature_np, cmap="viridis")
+        #         axes[0].set_title("Dense Feature")
+        #         axes[0].axis("off")
+        #         axes[1].imshow(sparse_feature_np, cmap="viridis")
+        #         axes[1].set_title("Sparse Feature")
+        #         axes[1].axis("off")
+
+        #         # 保存到文件
+        #         plt.savefig(os.path.join(save_dir, f"feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+        #         plt.close() 
+        # self.sample_idx += 1
+        return sparse_features
 
     def _set_aux_loss(self, outputs_class, outputs_coord):
         return [{"pred_logits": a, "pred_boxes": b} for a, b in

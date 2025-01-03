@@ -93,7 +93,7 @@ def main():
         # if we train the model from scratch, we need to create a folder
         # to save the model,
         saved_path = train_utils.setup_train(hypes)
-        scheduler = train_utils.setup_lr_schedular(hypes, optimizer)
+        scheduler = train_utils.setup_lr_schedular(hypes, optimizer,total_iters_each_epoch=len(train_loader))
 
     log_file = os.path.join(saved_path, ('log_train_%s.txt' % datetime.datetime.now().strftime('%Y%m%d-%H%M%S')))
     logger = common_utils.create_logger(log_file, rank=0)
@@ -195,11 +195,13 @@ def main():
             ExponentialLR	            每个 epoch 或 batch 调用，具体需求决定
             """
             cur_lr = optimizer.param_groups[0]['lr']
-            scheduler.step()
+            if hypes['lr_scheduler']['core_method'] == "onecycle":
+                cur_iter = epoch * len(train_loader) + i
+                scheduler.step(cur_iter)
 
             # torch.cuda.empty_cache()
-        writer.add_scalar('meta_data/learning_rate', cur_lr, epoch) # 学习率train一轮后记录一次
-        logger.info(f"=== current lr is {cur_lr} ===")
+            writer.add_scalar('meta_data/learning_rate', cur_lr, epoch) # 学习率train一轮后记录一次
+        # logger.info(f"=== current lr is {cur_lr} ===")
         end_time = time.time()
         # second_each_iter = pbar2.format_dict['elapsed'] / max(batch_len, 1.0)
         epoch_cost = (end_time - start_time_batch)/60
@@ -254,7 +256,8 @@ def main():
                        os.path.join(saved_path,
                                     'net_epoch%d.pth' % (epoch + 1)))
         # 验证阶段需要scherduler.step()吗？
-        scheduler.step()
+        if hypes['lr_scheduler']['core_method'] != "onecycle":
+            scheduler.step()
 
         opencood_train_dataset.reinitialize()
 

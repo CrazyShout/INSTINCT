@@ -1,4 +1,4 @@
-name: dairv2x_CQCP_lidar_intermediate_fusion_second_w_foregroundfusion
+name: dairv2x_CQCP_lidar_intermediate_fusion_second_onecycle
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -189,40 +189,40 @@ model:
       dim: [ 256 ]
       input_dim: 384 # 128 * 3
 
+# # optimizer:
+# #   core_method: AdamW
+# #   lr: 1e-5
+# #   args:
+# #     eps: 1e-10
+# #     weight_decay: 1e-2
+
+# # lr_scheduler:
+# #   core_method: fade
+# #   max_lr: 1e-4  # Set to the desired max learning rate for the fade-in phase
+# #   fade_in_ratio: 0.3  # Ratio of steps for the fade-in phase
+# #   fade_out_ratio: 0.7  # Ratio of steps for the fade-out phase
+
 # optimizer:
 #   core_method: AdamW
-#   lr: 1e-5
+#   lr: 1e-4
 #   args:
 #     eps: 1e-10
 #     weight_decay: 1e-2
 
 # lr_scheduler:
-#   core_method: fade
-#   max_lr: 1e-4  # Set to the desired max learning rate for the fade-in phase
-#   fade_in_ratio: 0.3  # Ratio of steps for the fade-in phase
-#   fade_out_ratio: 0.7  # Ratio of steps for the fade-out phase
+#   core_method: Exponential #step, multistep and Exponential support
+#   gamma: 0.9
+#   #step_size: [20, 35]
 
 optimizer:
-  core_method: AdamW
-  lr: 1e-4
+  core_method: adam_onecycle
   args:
-    eps: 1e-10
     weight_decay: 1e-2
 
 lr_scheduler:
-  core_method: Exponential #step, multistep and Exponential support
-  gamma: 0.9
-  #step_size: [20, 35]
-
-# optimizer:
-#   core_method: adam_onecycle
-#   args:
-#     weight_decay: 1e-2
-
-# lr_scheduler:
-#   core_method: onecycle #step, multistep and Exponential support
-#   max_lr: 0.002
-#   moms: [0.95, 0.85]
-#   div_factor: 10
-#   pct_start: 0.4
+  core_method: onecycle #step, multistep and Exponential support
+  max_lr: 0.002
+  moms: [0.95, 0.85]
+  div_factor: 10
+  pct_start: 0.4
 

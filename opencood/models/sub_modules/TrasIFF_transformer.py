@@ -11,6 +11,7 @@ import math
 from opencood.models.sub_modules.box_attention import Box3dAttention
 from opencood.models.sub_modules.torch_transformation_utils import warp_affine_simple
 from opencood.utils import box_utils
+from opencood.pcdet_utils.roiaware_pool3d import roiaware_pool3d_utils
 
 class MLP(nn.Module):
     """Very simple multi-layer perceptron (also called FFN)"""
@@ -412,6 +413,12 @@ class TransIFFEncoder(nn.Module):
         inter_references_out = inter_references
         return hs, init_reference_out, inter_references_out, memory, src_anchors, topk_indexes
 
+class MaxFusion(nn.Module):
+    def __init__(self):
+        super(MaxFusion, self).__init__()
+
+    def forward(self, x):
+        return torch.max(x, dim=0, keepdim=True)[0]
 
 # simple fusion use Scaled Dot Product Attention
 class AttenQueryFusion(nn.Module):
@@ -542,6 +549,9 @@ class Transformer(nn.Module):
         num_classes=1,
         mom=0.999,
         cp_flag=False,
+        box_encode_func=None, 
+        box_decode_func=None, 
+        get_sparse_features_func=None
     ):
         super().__init__()
 
@@ -550,6 +560,10 @@ class Transformer(nn.Module):
         self.m = mom
         self.extra_query_num = 200 # 额外的query数量，用于非重叠位置的补充
 
+        self.box_encode_func=box_encode_func
+        self.box_decode_func=box_decode_func
+        self.get_sparse_features_func=get_sparse_features_func
+
         encoder_layer = TransformerEncoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
         self.trans_adapter = TransAdapt(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
@@ -557,9 +571,10 @@ class Transformer(nn.Module):
         # self.ref_fusion = AttenQueryFusion(8)
         self.query_fusion = SimpleGatingFusion()
         self.ref_fusion = BoxGatingFusion()
-        self.debug = 0
+        self.foreground_fusion = MaxFusion()
         decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
+        self.sample_idx = 0
 
     def _create_ref_windows(self, tensor_list):
         device = tensor_list[0].device
@@ -624,7 +639,7 @@ class Transformer(nn.Module):
         split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
         return split_x
 
-    def forward(self, src, pos, noised_gt_box=None, noised_gt_onehot=None, attn_mask=None, targets=None, record_len=None, pairwise_t_matrix=None, pairwise_t_matrix_ref=None, box_encode_func=None, box_decode_func=None):
+    def forward(self, src, pos, noised_gt_box=None, noised_gt_onehot=None, attn_mask=None, targets=None, valid_bboxes_single = None, record_len=None, pairwise_t_matrix=None, pairwise_t_matrix_ref=None):
         '''
         src: [(B_n, 256, H, W)]
         pos: [(B_n, 256, H, W)]
@@ -646,8 +661,7 @@ class Transformer(nn.Module):
 
         memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors) # BoxAttention 提取特征 结果为(B_n, H*W, 256)
         query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors) # 返回None，None，(B_n, query_num+extra_num, 8)，(B_n, query_num+extra_num, 1)
-        # print("topk_indexes first is ", topk_indexes[0].tolist())
-        # print("memory shape is ", memory.shape)
+        
         ego_topk_proposals = topk_proposals[:, :self.num_queries, :] # (B_n, query_num, 8)
         ego_topk_indexes = topk_indexes[:, :self.num_queries, :] # (B_n, query_num, 1)
         extra_topk_proposals = topk_proposals[:, self.num_queries:, :]  # (B_n, extra_num, 8)
@@ -676,6 +690,14 @@ class Transformer(nn.Module):
         memory_mask = memory_mask.scatter(1, ego_topk_indexes.repeat(1, 1, memory_mask.size(-1)), valid_flag) # (B_n, HW, 1)  将fined query给标记
         memory_mask = memory_mask.permute(0, 2, 1).reshape(memory_mask.shape[0], 1, H, W) # (B_n, 1, H, W)
 
+        # 获取稀疏特征图，训练时使用GT来截取，推理时使用single检测结果截取
+        memory_sparse = memory.permute(0, 2, 1).reshape(memory.shape[0], memory.shape[-1], H, W) # (B_n, 256, H, W) 
+        if valid_bboxes_single is not None:
+            rois_lst = valid_bboxes_single # [N1, N2, N3, N4] 每个场景中每个single的bbx
+        memory_sparse = self.get_sparse_features_func(memory_sparse, rois_lst) # (B_n, 256, H, W) 
+        # memory_sparse = memory_sparse.flatten(2).permute(0, 2, 1) # (B_n, HW, C) 
+        # print("memory_sparse shape is ", memory_sparse.shape)
+
         memory_batch_lst = self.regroup(memory, record_len)
         memory_discrete_batch_lst = self.regroup(memory_discrete, record_len)
         ref_boxes_before_trans_batch_lst = self.regroup(ref_boxes_before_trans, record_len)
@@ -686,6 +708,8 @@ class Transformer(nn.Module):
         extra_query_batch_lst = self.regroup(extra_query, record_len)
         extra_topk_proposals_batch_lst = self.regroup(extra_topk_proposals, record_len) #  [(N1, extra_num, 8), (N2, extra_num, 8)...]
 
+        memory_sparse_batch_lst =  self.regroup(memory_sparse, record_len)
+
         fused_queries = []
         fused_ref_windows = []
         fused_indicies = []
@@ -695,19 +719,54 @@ class Transformer(nn.Module):
             N = record_len[bid] # number of valid agent
             
             memory_b = memory_batch_lst[bid] # (N, H*W, C) 单独一个样本下的N个agent，其中第一个为ego的feature
+            memory_sparse_b = memory_sparse_batch_lst[bid] # (N, C, H, W) 稀疏特征图
             memory_discrete_b = memory_discrete_batch_lst[bid] # (N, C, H, W) Encoder筛选过的留下来，其余全部为空
             ref_boxes_trans_b = ref_boxes_before_trans_batch_lst[bid][:,:7,:,:] # (N, 7, H, W) Encoder筛选过的留下来，其余全部为空
             ref_probs_trans_b = ref_boxes_before_trans_batch_lst[bid][:,7:,:,:] # (N, 1, H, W) Encoder筛选过的留下来，其余全部为空
             memory_mask_b = memory_mask_batch_lst[bid] # (N, 1, H, W)
             t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
             t_matrix_ref = pairwise_t_matrix_ref[bid][:N, :N, :, :] # (N, N, 4, 4)
-            # print("bid is ", bid)
-            # print("record_len is ", record_len)
-            # print("memory_discrete_b shape is ", memory_discrete_b.shape)
-            # print("t_matrix shape is ", t_matrix.shape)
+            
             neighbor_memory = warp_affine_simple(memory_discrete_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, C, H, W)
             ref_boxes_trans_b = warp_affine_simple(ref_boxes_trans_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 7, H, W)
             neighbor_memory_mask = warp_affine_simple(memory_mask_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 1, H, W)
+
+            neighbor_memory_sparse_b = warp_affine_simple(memory_sparse_b, t_matrix[0, :, :, :], (H, W), mode='bilinear') # (N, C, H, W)
+
+            # import matplotlib.pyplot as plt
+            # import os
+            # if self.sample_idx % 20 == 0:
+            #     save_dir = "./feature_visualizations"
+            #     os.makedirs(save_dir, exist_ok=True)
+            #     for b in range(N):
+            #         feature_map = neighbor_memory_sparse_b[b]
+            #         feature_map = feature_map.mean(dim=0)
+
+            #         # 将特征图归一化到 [0, 255]
+            #         def normalize_to_image(tensor):
+            #             tensor = tensor - tensor.min()
+            #             tensor = tensor / tensor.max()
+            #             return (tensor * 255).byte()
+                    
+            #         dense_feature = normalize_to_image(feature_map)
+
+            #         # 转为 NumPy 格式
+            #         dense_feature_np = dense_feature.cpu().numpy()
+
+            #         # 创建可视化画布
+            #         plt.figure(figsize=(20, 10))
+            #         plt.imshow(dense_feature_np, cmap="viridis")
+            #         plt.axis("off")
+
+            #         # 保存到文件
+            #         plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+            #         plt.close() 
+            # self.sample_idx += 1
+
+            neighbor_memory_sparse_b = neighbor_memory_sparse_b.flatten(2).permute(0, 2, 1) # (N, HW, C) 
+            if memory_b.size(0) != 1: # 注释掉则不使用foreground fusion
+                memory_b = torch.cat([memory_b[:1], neighbor_memory_sparse_b[1:]], dim=0)
+                memory_b = self.foreground_fusion(memory_b) # (1, H*W, C)
 
             ref_boxes_trans_b = torch.cat([ref_boxes_trans_b, ref_probs_trans_b], dim=1) # (N, 8, H, W)
             neighbor_memory = neighbor_memory.flatten(2).permute(0, 2, 1) # (N, HW, C)
@@ -728,7 +787,7 @@ class Transformer(nn.Module):
             none_ego_ref_trans_lst = []
             # 旋转参考框，暂时没搞空间变换矩阵的缩放，如果直接缩放空间变换矩阵则不用encode和decode box，但是目前先以这样的方式验证逻辑 TODO 后面要改
             for id, nef in enumerate(none_ego_ref):
-                none_ego_bbox_center = box_decode_func(nef[..., :7].squeeze(0)) # (n, 7) 反归一化
+                none_ego_bbox_center = self.box_decode_func(nef[..., :7].squeeze(0)) # (n, 7) 反归一化
 
                 none_ego_bbox_corner = box_utils.boxes_to_corners_3d(none_ego_bbox_center, 'lwh') # (n, 8, 3)
                 projected_none_ego_bbox_corner = box_utils.project_box3d(none_ego_bbox_corner.float(), t_matrix_ref[0,id+1].float())
@@ -738,7 +797,7 @@ class Transformer(nn.Module):
                 # print("none_ego_bbox_center is ", none_ego_bbox_center)
                 # print("projected_none_ego_bbox_center is ", projected_none_ego_bbox_center)
                 # xxx
-                projected_none_ego_bbox_center = box_encode_func(projected_none_ego_bbox_center) # 重新归一化
+                projected_none_ego_bbox_center = self.box_encode_func(projected_none_ego_bbox_center) # 重新归一化
                 projected_none_ego_bbox_center = torch.cat([projected_none_ego_bbox_center, nef[0, :, 7:]], dim=-1) # # (n, 8)
                 none_ego_ref_trans_lst.append(projected_none_ego_bbox_center.unsqueeze(0))
 
