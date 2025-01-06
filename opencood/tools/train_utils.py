@@ -205,11 +205,6 @@ def setup_optimizer(hypes, model):
     # 获取 initial_lr 和 lr 的值
     lr = method_dict.get('initial_lr', 0.001)  # initial learning rate
     initial_lr = method_dict.get('initial_lr', lr)  # 如果没有指定 initial_lr，则使用 lr 作为初始学习率
-    # 下面的都是用在oneCycle策略中的
-    # max_lr = method_dict.get('max_lr', lr)
-    # min_lr = method_dict.get('min_lr', lr)
-    # max_momentum = method_dict.get('max_momentum', 0.95)  
-    # base_momentum = method_dict.get('base_momentum', 0.85)
 
     if not optimizer_method and method_dict['core_method'] != 'adam_onecycle':
         raise ValueError('{} is not supported'.format(method_dict['name']))
@@ -235,12 +230,9 @@ def setup_optimizer(hypes, model):
         optimizer = optimizer_method(model.parameters(),
                                 lr=lr)
     # 确保每个 param_group 都有参数
-    # for param_group in optimizer.param_groups:
-    #     param_group['initial_lr'] = initial_lr
-        # param_group['max_lr'] = max_lr  # 添加 max_lr
-        # param_group['min_lr'] = min_lr
-        # param_group['max_momentum'] = max_momentum  # 添加 max_momentum
-        # param_group['base_momentum'] = base_momentum
+    for param_group in optimizer.param_groups:
+        param_group['initial_lr'] = initial_lr
+   
     return optimizer
 
 
@@ -329,7 +321,6 @@ class FadeScheduler(_LRScheduler):
         self.fade_in_epochs = int(total_epochs * fade_in_ratio)
         self.fade_out_epochs = int(total_epochs * fade_out_ratio)
         self.start_lr = optimizer.defaults['lr']
-        print(self.start_lr)
         self.end_lr = end_lr if end_lr is not None else self.start_lr / 10
         self.last_epoch = last_epoch
         self.base_lrs = [optimizer.defaults['lr']]
@@ -337,7 +328,7 @@ class FadeScheduler(_LRScheduler):
 
     def get_lr(self):
         # 基于当前epoch计算学习率
-        current_epoch = self.last_epoch + 1
+        current_epoch = self.last_epoch
         
         if current_epoch <= self.fade_in_epochs:
             # 增长阶段：从start_lr线性增长到max_lr
