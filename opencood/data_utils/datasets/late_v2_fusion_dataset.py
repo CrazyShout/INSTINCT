@@ -585,6 +585,15 @@ def getLatev2FusionDataset(cls):
             pred_score = output_dict_ego["ego"]['pred_scores']
             from opencood.utils import box_utils
             pred_box_tensor = box_utils.boxes_to_corners_3d(pred_box_tensor, order='lwh')
+            keep_index = box_utils.nms_rotated(pred_box_tensor,
+                                            pred_score,
+                                            0.15
+                                            )
+
+            pred_box_tensor = pred_box_tensor[keep_index]
+
+            # select cooresponding score
+            pred_score = pred_score[keep_index]
             return pred_box_tensor, pred_score, gt_box_tensor
 
         def post_process_no_fusion_uncertainty(self, data_dict, output_dict_ego):

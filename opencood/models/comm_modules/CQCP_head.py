@@ -355,12 +355,18 @@ class CQCPHead(nn.Module):
         hidden_state: (3, B, pad_size + all_query_num + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是Decoder layer每一层的query
         init_reference: (B, pad_size + all_query_num + 4*max_gt_num, 7) 6批噪声gt+初始的all_query_num个box 加上 4批 gt, 第一批是gt,后面3批示噪声gt正样本
         inter_references: (3, B, pad_size + all_query_num + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
-        src_embed: (B, H*W, 256) 粗查询, 经过了三层Encoder layer后scatter回去
-        src_ref_windows: (B, H * W, 7) 参考框，类似于锚框
-        src_indexes: (B, query_num, 1) ego个fined dqs query 索引 其中all_query_num == query_num + extra_num 这个用于监督encoder的单车输出
+        src_embed: (B_n, H*W, 256) 粗查询, 经过了三层Encoder layer后scatter回去
+        src_ref_windows: (B_n, H * W, 7) 参考框，类似于锚框
+        src_indexes: (B_n, query_num, 1) ego个fined dqs query 索引 其中all_query_num == query_num + extra_num 这个用于监督encoder的单车输出
         '''
         hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
-
+        # print("hidden_state shape is ", hidden_state.shape)
+        # print("init_reference shape is ", init_reference.shape)
+        # print("inter_references shape is ", inter_references.shape)
+        # print("src_embed shape is ", src_embed.shape)
+        # print("src_ref_windows shape is ", src_ref_windows.shape)
+        # print("src_indexes shape is ", src_indexes.shape)
+        
         # decoder
         outputs_classes = []
         outputs_coords = []
@@ -405,9 +411,9 @@ class CQCPHead(nn.Module):
         if self.train_flag: # 防止梯度流被污染，Encoder只是筛选query，筛选时不能参与梯度计算(且计算图不连续)，否则训练早期低质量的query会大幅度影响结果，因此在Encoder中必须要detach
             enc_class, enc_coords = self.transformer.proposal_head(src_embed, src_ref_windows) # 获取encoder检测结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
             enc_outputs = {
-                'topk_indexes': src_indexes,    # (B, query_num, 1) # 通过encoder挑选的Top K 个query的索引
-                'pred_logits': enc_class,       # (B, H*W, 1)
-                'pred_boxes': enc_coords,       # (B, H*W, 7)
+                'topk_indexes': src_indexes,    # (B_n, query_num, 1) # 通过encoder挑选的Top K 个query的索引
+                'pred_logits': enc_class,       # (B_n, H*W, 1)
+                'pred_boxes': enc_coords,       # (B_n, H*W, 7)
             }
 
         # compute decoder losses
@@ -855,10 +861,7 @@ class ClassificationLoss(nn.Module):
     ):
         # 输入的两项形状都为 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 预测结果 & one-hot编码
         p = torch.sigmoid(logits)
-        # print("p.shape is ", p.shape)
-        # print("targets.shape is ", targets.shape)
-        # print("targets is ", targets)
-        # xxx
+
         ce_loss = F.binary_cross_entropy(p, targets, reduction="none") # 二元交叉熵 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 
         p_t = p * targets + (1 - p) * (1 - targets)
         loss = ce_loss * ((1 - p_t) ** gamma) # 包含调节因子，初步形成focal loss

@@ -289,8 +289,12 @@ def setup_lr_schedular(hypes, optimizer, init_epoch=None, total_iters_each_epoch
         gamma = lr_schedule_config['gamma']
         scheduler = ExponentialLR(optimizer, gamma)
 
-    for _ in range(last_epoch):
-        scheduler.step()
+    if lr_schedule_config['core_method'] == 'onecycle':
+        for i in range(last_epoch*total_iters_each_epoch):
+            scheduler.step(i)
+    else:
+        for _ in range(last_epoch):
+            scheduler.step()
 
     return scheduler
 

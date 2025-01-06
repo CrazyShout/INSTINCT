@@ -9,13 +9,14 @@ from opencood.models.sub_modules.mean_vfe import MeanVFE
 from opencood.models.sub_modules.sparse_backbone_3d import VoxelBackBone8x
 from opencood.models.sub_modules.height_compression import HeightCompression
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
+from opencood.models.sub_modules.cia_ssd_utils import SSFA
 from opencood.models.comm_modules.ConQueR_head import ConQueRHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
 
-class ConQueRSecond(nn.Module):
+class ConQueRSecondSSA(nn.Module):
     def __init__(self, args):
-        super(ConQueRSecond, self).__init__()
+        super(ConQueRSecondSSA, self).__init__()
 
         # mean_vfe
         self.mean_vfe = MeanVFE(args['vfe'], 4)
@@ -25,7 +26,7 @@ class ConQueRSecond(nn.Module):
         # height compression
         self.height_compression = HeightCompression(args['map_to_bev'])
         # base ben backbone
-        self.backbone_2d = BaseBEVBackbone(args['backbone_2d'], 256)
+        self.backbone_2d = SSFA(args['backbone_2d'])
 
         self.train_flag = args.get("train_flag", True)
         
@@ -48,7 +49,7 @@ class ConQueRSecond(nn.Module):
         batch_dict = self.mean_vfe(batch_dict) # m 5 4 -> m 4
         batch_dict = self.backbone_3d(batch_dict) 
         batch_dict = self.height_compression(batch_dict)# 降维 压缩高度 得到4个样本，每个样本256特征维度 (256, 100, 252)
-        batch_dict = self.backbone_2d(batch_dict)# 会形成两个尺度的256 得到512
+        batch_dict['spatial_features_2d'] = self.backbone_2d(batch_dict['spatial_features'])# 会形成两个尺度的256 得到512
         batch_dict = self.dense_head(batch_dict)
 
         if self.train_flag: # 之所以不用nn中的training来判断，实际上是因为loss和模型一起计算，解耦有点麻烦，且因为detr-based方法需要大量的loss，如果解耦反而要return大量的东西

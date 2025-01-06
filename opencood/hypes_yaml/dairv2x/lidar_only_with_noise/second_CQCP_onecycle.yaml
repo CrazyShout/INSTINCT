@@ -1,0 +1,228 @@
+name: dairv2x_CQCPFeature_lidar_intermediate_fusion_second_onecycle
+data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
+root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
+validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+test_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+
+class_names: ['Car']
+
+yaml_parser: "load_second_params"
+train_params:
+  batch_size: &batch_size 6
+  epoches: 60
+  eval_freq: 1
+  save_freq: 1
+
+dataset: 'dairv2x'
+
+input_source: ['lidar']
+label_type: 'lidar'
+
+comm_range: 100
+only_vis_ego: true
+
+fusion:
+  core_method: 'intermediatev2'
+  dataset: 'dairv2x'
+  args: []
+
+# preprocess-related
+preprocess:
+  # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+  core_method: 'SpVoxelPreprocessor'
+  args:
+    voxel_size: &voxel_size [0.1, 0.1, 0.1]
+    max_points_per_voxel: 5
+    max_voxel_train: 32000
+    max_voxel_test: 70000
+  # lidar range for each individual cav.
+  cav_lidar_range: &cav_lidar [-100.8, -40, -3.5, 100.8, 40, 1.5]
+
+data_augment:
+  - NAME: gt_sampling
+    USE_ROAD_PLANE: False
+    DB_INFO_PATH:
+        - dairv2x_dbinfos_fusion.pkl #[fusion, vehilce]
+    PREPARE: {
+        filter_by_min_points: ['Car:5'],
+        # filter_by_difficulty: [-1],
+    }
+
+    SAMPLE_GROUPS: ['Car:15']
+    NUM_POINT_FEATURES: 4
+    DATABASE_WITH_FAKELIDAR: False
+    REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+    LIMIT_WHOLE_SCENE: False
+    BOX_ORDER: 'lwh'
+
+  # - NAME: random_world_flip
+  #   ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
+
+  # - NAME: random_world_rotation
+  #   WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+
+  # - NAME: random_world_scaling
+  #   WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
+# anchor box related
+postprocess:
+  core_method: 'VoxelPostprocessor' # VoxelPostprocessor, BevPostprocessor supported
+  gt_range: *cav_lidar
+  anchor_args:
+    cav_lidar_range: *cav_lidar
+    l: 4.5
+    w: 2
+    h: 1.56
+    r: &anchor_yaw [0, 90]
+    feature_stride: 2
+    num: &anchor_num 2
+    # vw: 0.1 # 加载yaml时覆写入，下同
+    # vh: 0.1
+    # vd: 0.1
+    # W: 2016
+    # H: 800
+    # D: 50
+
+  target_args:
+    pos_threshold: 0.6
+    neg_threshold: 0.45
+    score_threshold: 0.20
+  order: 'lwh' # hwl or lwh
+  max_num: 100 # maximum number of objects in a single frame. use this number to make sure different frames has the same dimension in the same batch
+  nms_thresh: 0.15
+  dir_args: &dir_args
+    dir_offset: 0.7853
+    num_bins: 2
+    anchor_yaw: *anchor_yaw
+
+# model related
+model:
+  core_method: second_boxattention_cqcp
+  args:
+    train_flag: True
+    supervise_single: True
+    # grid_size: [2016, 800, 50] 载入yaml时覆写入
+    voxel_size: *voxel_size
+    lidar_range: *cav_lidar
+    anchor_number: *anchor_num
+    dir_args: *dir_args
+    vfe:
+      name: MeanVFE
+
+    backbone_3d:
+        name: VoxelResBackBone8xVoxel
+        num_features_out: 128
+
+    map_to_bev:
+        name: HeightCompression
+        feature_num: 256
+
+    backbone_2d:
+        name: BaseBEVBackbone
+
+        layer_nums: [5, 5]
+        layer_strides: [ 1, 2 ]
+        num_filters: [ 128, 256 ]
+        upsample_strides: [ 1, 2 ]
+        num_upsample_filter: [ 256, 256 ]
+
+    dense_head:
+        name: CQCPHead
+
+        class_agnostic: True # 类别无关 所有label合一
+        feature_map_stride: 8
+
+        num_queries: 300
+        input_features: 512
+        hidden_channel: 256
+        num_heads: 8
+        dropout: 0.3
+        activation: 'gelu'
+        ffn_channel: 256
+        num_encoder_layers: 3
+        num_decoder_layers: 3
+        cp: True
+        keep_ratio: 0.3 # 这个是计算前景预测时候保留的比例
+        code_size: 7
+        iou_cls: [0] #b 表示关注哪些标签的类别，waymo上为[0,1]
+
+        dn:
+            enabled: True
+            dn_number: 3
+            dn_box_noise_scale: 0.4
+            dn_label_noise_ratio: 0
+
+        contrastive:
+            mom: 0.999
+            dim: 256
+            eqco: 1000
+            tau: 0.7
+            loss_coeff: 0.2
+
+        target_assigner_config:
+            hungarian_assigner:
+                cls_cost: 1.0
+                bbox_cost: 4.0
+                iou_cost: 2.0
+                rad_cost: 4.0
+
+        loss_config:
+            aux_loss: True
+
+        # iou refine score
+        use_iou_to_rectify_score: True
+        iou_rectifier: 0.68 # 用来控制分类和定位的重要性，这个值大则重视定位  waymo中是 [ 0.68, 0.71, 0.65 ]
+
+    base_bev_backbone:
+      resnet: true
+      layer_nums: [3, 4, 5]
+      layer_strides: [2, 2, 2]
+      num_filters: [64, 128, 256]
+      upsample_strides: [1, 2, 4]
+      num_upsample_filter: [128, 128, 128]
+
+    shrink_header:
+      use_atten: false
+      kernal_size: [ 3 ]
+      stride: [ 1 ]
+      padding: [ 1 ]
+      dim: [ 256 ]
+      input_dim: 384 # 128 * 3
+
+# # optimizer:
+# #   core_method: AdamW
+# #   lr: 1e-5
+# #   args:
+# #     eps: 1e-10
+# #     weight_decay: 1e-2
+
+# # lr_scheduler:
+# #   core_method: fade
+# #   max_lr: 1e-4  # Set to the desired max learning rate for the fade-in phase
+# #   fade_in_ratio: 0.3  # Ratio of steps for the fade-in phase
+# #   fade_out_ratio: 0.7  # Ratio of steps for the fade-out phase
+
+# optimizer:
+#   core_method: AdamW
+#   lr: 1e-4
+#   args:
+#     eps: 1e-10
+#     weight_decay: 1e-2
+
+# lr_scheduler:
+#   core_method: Exponential #step, multistep and Exponential support
+#   gamma: 0.9
+#   #step_size: [20, 35]
+
+optimizer:
+  core_method: adam_onecycle
+  args:
+    weight_decay: 1e-2
+
+lr_scheduler:
+  core_method: onecycle #step, multistep and Exponential support
+  max_lr: 1e-3
+  moms: [0.95, 0.85]
+  div_factor: 10
+  pct_start: 0.4
+

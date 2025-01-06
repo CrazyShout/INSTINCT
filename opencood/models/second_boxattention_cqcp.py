@@ -10,6 +10,7 @@ from opencood.models.sub_modules.sparse_backbone_3d import VoxelBackBone8x
 from opencood.models.sub_modules.height_compression import HeightCompression
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
 from opencood.models.comm_modules.CQCP_head import CQCPHead
+from opencood.models.comm_modules.CQCP_head_feature import CQCPFeatureHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
 
@@ -30,7 +31,7 @@ class SecondBoxAttentionCQCP(nn.Module):
         self.train_flag = args.get("train_flag", True)
         
         # dense_head
-        self.dense_head = CQCPHead(model_cfg=args['dense_head'], input_channels=args['dense_head']['input_features'], num_class=1, class_names=['vehicle'], grid_size=args['grid_size'],
+        self.dense_head = CQCPFeatureHead(model_cfg=args['dense_head'], input_channels=args['dense_head']['input_features'], num_class=1, class_names=['vehicle'], grid_size=args['grid_size'],
                                    point_cloud_range=args['lidar_range'], predict_boxes_when_training=False, voxel_size=args['voxel_size'], train_flag=self.train_flag)
 
     def forward(self, data_dict):

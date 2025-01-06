@@ -85,7 +85,7 @@ def main():
         saved_path = opt.model_dir
         init_epoch, model = train_utils.load_saved_model(saved_path, model)
         lowest_val_epoch = init_epoch
-        scheduler = train_utils.setup_lr_schedular(hypes, optimizer, init_epoch=init_epoch)
+        scheduler = train_utils.setup_lr_schedular(hypes, optimizer, init_epoch=init_epoch, total_iters_each_epoch=len(train_loader))
         print(f"resume from {init_epoch} epoch.")
 
     else:

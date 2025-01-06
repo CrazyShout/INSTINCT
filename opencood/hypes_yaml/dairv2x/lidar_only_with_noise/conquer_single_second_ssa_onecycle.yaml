@@ -1,4 +1,4 @@
-name: dairv2x_CQCP_lidar_intermediate_fusion_second_onecycle
+name: dairv2x_ConQueR_lidar_late_fusion_second_ssa_onecycle
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -22,7 +22,7 @@ comm_range: 100
 only_vis_ego: true
 
 fusion:
-  core_method: 'intermediatev2'
+  core_method: 'latev2'
   dataset: 'dairv2x'
   args: []
 
@@ -55,14 +55,14 @@ data_augment:
     LIMIT_WHOLE_SCENE: False
     BOX_ORDER: 'lwh'
 
-  # - NAME: random_world_flip
-  #   ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x', 'y' ] # 这里相比较SEED少了一个轴y，可以消融看看有什么不同
 
-  # - NAME: random_world_rotation
-  #   WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
 
-  # - NAME: random_world_scaling
-  #   WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
 
 # anchor box related
 postprocess:
@@ -97,10 +97,9 @@ postprocess:
 
 # model related
 model:
-  core_method: second_boxattention_cqcp
+  core_method: conquer_second_ssa
   args:
     train_flag: True
-    supervise_single: True
     # grid_size: [2016, 800, 50] 载入yaml时覆写入
     voxel_size: *voxel_size
     lidar_range: *cav_lidar
@@ -118,28 +117,27 @@ model:
         feature_num: 256
 
     backbone_2d:
-        name: BaseBEVBackbone
-
-        layer_nums: [5, 5]
-        layer_strides: [ 1, 2 ]
-        num_filters: [ 128, 256 ]
-        upsample_strides: [ 1, 2 ]
-        num_upsample_filter: [ 256, 256 ]
+        name: SSFA
+        feature_num: 256
+        # layer_nums: [5, 5]
+        # layer_strides: [ 1, 2 ]
+        # num_filters: [ 128, 256 ]
+        # upsample_strides: [ 1, 2 ]
+        # num_upsample_filter: [ 256, 256 ]
 
     dense_head:
-        name: CQCPHead
+        name: ConQueRHead
 
         class_agnostic: True # 类别无关 所有label合一
         feature_map_stride: 8
 
         num_queries: 300
-        input_features: 512
+        input_features: 256
         hidden_channel: 256
         num_heads: 8
-        dropout: 0.3
+        dropout: 0.1
         activation: 'gelu'
         ffn_channel: 256
-        num_encoder_layers: 3
         num_decoder_layers: 3
         cp: True
         keep_ratio: 0.3 # 这个是计算前景预测时候保留的比例
@@ -189,31 +187,6 @@ model:
       dim: [ 256 ]
       input_dim: 384 # 128 * 3
 
-# # optimizer:
-# #   core_method: AdamW
-# #   lr: 1e-5
-# #   args:
-# #     eps: 1e-10
-# #     weight_decay: 1e-2
-
-# # lr_scheduler:
-# #   core_method: fade
-# #   max_lr: 1e-4  # Set to the desired max learning rate for the fade-in phase
-# #   fade_in_ratio: 0.3  # Ratio of steps for the fade-in phase
-# #   fade_out_ratio: 0.7  # Ratio of steps for the fade-out phase
-
-# optimizer:
-#   core_method: AdamW
-#   lr: 1e-4
-#   args:
-#     eps: 1e-10
-#     weight_decay: 1e-2
-
-# lr_scheduler:
-#   core_method: Exponential #step, multistep and Exponential support
-#   gamma: 0.9
-#   #step_size: [20, 35]
-
 optimizer:
   core_method: adam_onecycle
   args:
@@ -221,8 +194,7 @@ optimizer:
 
 lr_scheduler:
   core_method: onecycle #step, multistep and Exponential support
-  max_lr: 0.002
+  max_lr: 1e-3
   moms: [0.95, 0.85]
   div_factor: 10
   pct_start: 0.4
-
