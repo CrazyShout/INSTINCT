@@ -491,10 +491,7 @@ class VoxelPostprocessor(BasePostprocessor):
                                            scores,
                                            self.params['nms_thresh']
                                            )
-        # print("self.params['nms_thresh'] is ", self.params['nms_thresh'])
-        # print("self.params['gt_range'] is ", self.params['gt_range'])
-        # print("self.params['order'] is ", self.params['order'])
-        # xxx
+
         pred_box3d_tensor = pred_box3d_tensor[keep_index]
 
         # select cooresponding score

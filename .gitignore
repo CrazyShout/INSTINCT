@@ -140,3 +140,4 @@ dataset
 opencood/logs
 ./vscode
 feature_visualizations
+feature_visualizations_discrete

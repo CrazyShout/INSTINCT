@@ -72,11 +72,32 @@ def main():
     lowest_val_loss = 1e5
     lowest_val_epoch = -1
 
+    # load pre-train model for single view
+    is_pre_trained = False
+    if 'is_single_pre_trained' in hypes and hypes['is_single_pre_trained']['pre_train_flag']:
+        is_pre_trained = True
+    if is_pre_trained:
+        pretrain_path = hypes['is_single_pre_trained']['pre_train_path']
+        initial_epoch = hypes['is_single_pre_trained']['pre_train_epoch']
+        pre_train_model = torch.load(os.path.join(pretrain_path, 'net_epoch%d.pth' % initial_epoch))
+        diff_keys = {k:v for k, v in pre_train_model.items() if k not in model.state_dict()}
+        if diff_keys:
+            print(f"!!! PreTrained single model has keys: {diff_keys.keys()}, \
+                which are not in the fusion model you have created!!!")
+            raise ValueError("fusion model lack parameters! --from xyj at 2024/06/12")
+        model.load_state_dict(pre_train_model, strict=False)
+        print("### Pre-trained model {} loaded successfully! ###".format(os.path.join(pretrain_path, 'net_epoch%d.pth' % initial_epoch)))
+        fix = hypes['is_single_pre_trained']['pre_train_fix'] # 这个暂时用不到，因为我在训练单车的时候用的是fuse部分改的，导致所有的模型 parameter都在，然后会导致所有的参数都不需要反向传播
+        # if fix:
+        #     for name, value in model.named_parameters():
+        #         if name in pre_train_model:
+        #             value.requires_grad = False
+
     # define the loss
     # criterion = train_utils.create_loss(hypes)
 
     # optimizer setup
-    optimizer = train_utils.setup_optimizer(hypes, model)
+    optimizer = train_utils.setup_optimizer(hypes, model, is_pre_trained)
     # lr scheduler setup
     
 
@@ -179,6 +200,7 @@ def main():
 
             # back-propagation
             # torch.autograd.set_detect_anomaly(True) # 异常检测，debug only use
+            # torch.autograd.set_grad_enabled(True)
             final_loss.backward()
 
             # print("Gradient norm for classification head:", torch.norm(model.dense_head.transformer.proposal_head.class_embed[0].layers[-1].weight.grad))

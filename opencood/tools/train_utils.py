@@ -189,7 +189,7 @@ def create_loss(hypes):
     return criterion
 
 
-def setup_optimizer(hypes, model):
+def setup_optimizer(hypes, model, is_pre_trained=False):
     """
     Create optimizer corresponding to the yaml file
 
@@ -206,13 +206,18 @@ def setup_optimizer(hypes, model):
     lr = method_dict.get('initial_lr', 0.001)  # initial learning rate
     initial_lr = method_dict.get('initial_lr', lr)  # 如果没有指定 initial_lr，则使用 lr 作为初始学习率
 
+    # if is_pre_trained:
+    #     params = filter(lambda p: p.requires_grad, model.parameters())
+    # else:
+    #     params = model.parameters()
+
     if not optimizer_method and method_dict['core_method'] != 'adam_onecycle':
         raise ValueError('{} is not supported'.format(method_dict['name']))
     if 'args' in method_dict and method_dict['core_method'] != 'adam_onecycle':
         optimizer = optimizer_method(model.parameters(),
                                 lr=lr,
                                 **method_dict['args'])
-    elif method_dict['core_method'] == 'adam_onecycle':
+    elif method_dict['core_method'] == 'adam_onecycle': # 包装器中已经有了过滤不需要梯度的参数
         def children(m: nn.Module):
             return list(m.children())
 

@@ -12,7 +12,7 @@ from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
 from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
-from opencood.models.sub_modules.TrasIFF_transformer import TransformerFeature, MLP, get_clones
+from opencood.models.sub_modules.TrasIFF_transformer import TransformerInstance, MLP, get_clones
 
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -126,13 +126,13 @@ class MaskPredictor(nn.Module):
         return out
 
 
-class CQCPFeatureHead(nn.Module):
+class CQCPInstanceHead(nn.Module):
     def __init__(
             self,
             model_cfg, input_channels, num_class, class_names, grid_size, point_cloud_range, voxel_size,
             predict_boxes_when_training=True, train_flag=True
     ):
-        super(CQCPFeatureHead, self).__init__()
+        super(CQCPInstanceHead, self).__init__()
 
         self.grid_size = grid_size # [2016, 800, 50]
         self.point_cloud_range = point_cloud_range # [-75.2, -75.2, -2, 75.2, 75.2, 4]
@@ -178,9 +178,9 @@ class CQCPFeatureHead(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
-        self.mask_predictor = MaskPredictor(self.hidden_channel)
+        # self.mask_predictor = MaskPredictor(self.hidden_channel)
 
-        self.transformer = TransformerFeature(
+        self.transformer = TransformerInstance(
             d_model=self.hidden_channel, # 256
             nhead=num_heads, # 8
             nlevel=1,
@@ -210,6 +210,12 @@ class CQCPFeatureHead(nn.Module):
             num_layers=num_decoder_layers,
         )
 
+        self.fused_detection_head = Det3DHead(
+            self.hidden_channel,
+            code_size=self.code_size,
+            num_classes=num_class,
+            num_layers=1,
+        )
         if self.train_flag and self.dn['enabled']:
             contras_dim = self.model_cfg['contrastive']['dim'] # 256
             self.eqco = self.model_cfg['contrastive']['eqco'] # 1000
@@ -265,6 +271,21 @@ class CQCPFeatureHead(nn.Module):
                     aux_weight_dict.update({k + f"_{i}": v for k, v in self.losses.weight_dict.items()})
                 self.losses.weight_dict.update(aux_weight_dict)
 
+        # self.parameters_fix()
+
+    def parameters_fix(self):
+        for p in self.input_proj.parameters():
+            p.requires_grad = False
+        if self.train_flag and self.dn['enabled']:
+            for p in self.projector.parameters():
+                p.requires_grad = False
+            for p in self.predictor.parameters():
+                p.requires_grad = False
+        for p in self.transformer.proposal_head.parameters():
+            p.requires_grad = False
+        for p in self.transformer.decoder.detection_head.parameters():
+            p.requires_grad = False
+
     def predict(self, batch_dict):
         spatial_features_2d = batch_dict['spatial_features_2d'] # B_N, 512, H, W
         record_len = batch_dict['record_len'] # 举个例子，batch size == 4时，形如List[2, 2, 2, 2]，表示每个场景样本下的agent数目为2，即一车一路
@@ -284,15 +305,15 @@ class CQCPFeatureHead(nn.Module):
         features.append(self.input_proj(spatial_features_2d)) # 放入一个B_n，256，H，W
         pos_encodings.append(self.pos_embed(spatial_features_2d)) # 位置编码 B_n，256， H， W
 
-        score_mask = self.mask_predictor(features[0]) # B, H, W
+        # score_mask = self.mask_predictor(features[0]) # B, H, W
 
         dn = self.dn
         if self.train_flag and dn['enabled'] and dn['dn_number'] > 0:
-            gt_boxes = batch_dict['object_bbx_center'] # B, maxnum, 7
-            gt_boxes_mask = batch_dict['object_bbx_mask'] # B, maxnum
+            gt_boxes = batch_dict['object_bbx_center_single'] # B, maxnum, 7
+            gt_boxes_mask = batch_dict['object_bbx_mask_single'] # B, maxnum
 
             targets = list() # 列表存放每个样本的标签
-            for batch_idx in range(batch_size):
+            for batch_idx in range(Bn): # 这里要注意要形成的是单车
                 target = {}
                 gt_bboxes = gt_boxes[batch_idx] # (maxnum, 7)
                 gt_bboxes_mask = gt_boxes_mask[batch_idx] # (maxnum, )
@@ -322,45 +343,39 @@ class CQCPFeatureHead(nn.Module):
         else:
             input_query_bbox = input_query_label = attn_mask = dn_meta = None
             targets = None
-
-        gt_boxes_single = batch_dict['object_bbx_center_single'] # B, maxnum, 7
-        gt_boxes_mask_single = batch_dict['object_bbx_mask_single'] # B, maxnum
-
-        targets_single = list() # 列表存放每个样本的标签
-        valid_bboxes_single = list()
-        for batch_idx in range(Bn):
-            target_single = {}
-            gt_bboxes_single = gt_boxes_single[batch_idx] # (maxnum, 7)
-            gt_bboxes_mask_single = gt_boxes_mask_single[batch_idx] # (maxnum, )
-            valid_box_single = gt_bboxes_single[gt_bboxes_mask_single.bool()] # （n_idx, 7）
-            valid_bboxes_single.append(valid_box_single.to(torch.float32))
-            # gt_labels_single = torch.ones(valid_box_single.size(0), device=valid_box_single.device, dtype=valid_box_single.dtype)
-            # target_single['gt_boxes'] = self.encode_bbox(valid_box_single) # 给gt box做好归一化工作
-            # target_single['labels'] = gt_labels_single.long() - 1 # (n_idx, )
-            # targets_single.append(target_single)
-
-        outputs = self.transformer(
+        # print("input_query_bbox shape is", input_query_bbox.shape)
+        # print("input_query_label shape is", input_query_label.shape)
+        outputs, all_queries, ref_bboxes = self.transformer(
             features, # [(B, 256, H, W)]
             pos_encodings, # [(B, 256, H, W)]
             input_query_bbox, # (B, pad_size, 7)
             input_query_label, # (B, pad_size, num_classes) num_classes=1
             attn_mask, # (1000+pad_size, 1000+pad_size)
             targets=targets, # [Sample1:Dict, Sample2:Dict...]
-            valid_bboxes_single = valid_bboxes_single,
             record_len=record_len,
             pairwise_t_matrix=pairwise_t_matrix,
             pairwise_t_matrix_ref=pairwise_t_matrix_ref,
-            score_mask = score_mask
         )
         '''
+        1️⃣outputs:
         hidden_state: (3, B, pad_size + all_query_num + 4*max_gt_num, 256) pad_size其实等于 6*max_gt_num 这是Decoder layer每一层的query
         init_reference: (B, pad_size + all_query_num + 4*max_gt_num, 7) 6批噪声gt+初始的all_query_num个box 加上 4批 gt, 第一批是gt,后面3批示噪声gt正样本
         inter_references: (3, B, pad_size + all_query_num + 4*max_gt_num, 8) pad_size其实等于 6*max_gt_num。 这是每一层的预测结果
         src_embed: (B_n, H*W, 256) 粗查询, 经过了三层Encoder layer后scatter回去
         src_ref_windows: (B_n, H * W, 7) 参考框，类似于锚框
         src_indexes: (B_n, query_num, 1) ego个fined dqs query 索引 其中all_query_num == query_num + extra_num 这个用于监督encoder的单车输出
+        2️⃣ all_queries: [(n1_all, 256), (n2_all, 256)...]
+        2️⃣ ref_bboxes: [(n1_all, 7), (n2_all, 7)...]
+        
         '''
-        hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
+
+        hidden_state = outputs['hs']
+        init_reference = outputs['init_reference_out']
+        inter_references = outputs['inter_references_out']
+        src_embed = outputs['memory']
+        src_ref_windows = outputs['src_anchors']
+        src_indexes = outputs['topk_indexes']
+        # hidden_state, init_reference, inter_references, src_embed, src_ref_windows, src_indexes = outputs
 
         # decoder
         outputs_classes = []
@@ -411,14 +426,25 @@ class CQCPFeatureHead(nn.Module):
                 'pred_boxes': enc_coords,       # (B, H*W, 7)
             }
 
+        fused_logits_lst = []
+        fused_boxes_lst = []
+        # print("len(all_queries) ", len(all_queries))
+        for b_id in range(len(all_queries)):
+            fused_class, fused_coords = self.fused_detection_head(all_queries[b_id].unsqueeze(0), ref_bboxes[b_id].unsqueeze(0)) # (1, n, 7), (1, n, 1)
+            fused_logits_lst.append(fused_class)
+            fused_boxes_lst.append(fused_coords)
+
         # compute decoder losses
         outputs = {
-            "pred_scores_mask": score_mask, # (B, H, W)
+            # "pred_scores_mask": score_mask, # (B, H, W)
+            
             "pred_logits": outputs_class[-1][:, : self.num_queries],    # (B, all_query_num, 1) # 最后一层
             "pred_boxes": outputs_coord[-1][:, : self.num_queries],     # (B, all_query_num, 7)
             "aux_outputs": self._set_aux_loss(
                 outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
             ),
+            "fused_logits": fused_logits_lst,
+            "fused_boxes": fused_boxes_lst,
         }
         if self.train_flag:
             '''
@@ -461,24 +487,26 @@ class CQCPFeatureHead(nn.Module):
 
     def get_bboxes(self, pred_dicts):
         outputs = pred_dicts['outputs']
-        out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
-        out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
-        batch_size = out_logits.shape[0]
+        out_logits = outputs['fused_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1 [(1,n, 1)]
+        out_bbox = outputs['fused_boxes'] # (B, 1000, 7)
+        batch_size = len(out_bbox)
 
-        out_prob = out_logits.sigmoid()
-        out_prob = out_prob.view(out_logits.shape[0], -1) # (B, 1000)
-        out_bbox = self.decode_bbox(out_bbox)
+        out_prob = [logits.sigmoid().view(1, -1) for logits in out_logits] # 每个(1, n)
+        out_bbox = [self.decode_bbox(box) for box in out_bbox]
+        # out_prob = out_logits.sigmoid()
+        # out_prob = out_prob.view(out_logits.shape[0], -1) # (B, 1000)
+        # out_bbox = self.decode_bbox(out_bbox)
 
         def _process_output(indices, bboxes):
-            topk_boxes = indices.div(out_logits.shape[2], rounding_mode="floor").unsqueeze(-1)
-            labels = indices % out_logits.shape[2] # 得到标签
-            boxes = torch.gather(bboxes, 0, topk_boxes.repeat(1, out_bbox.shape[-1]))
+            topk_boxes = indices.div(1, rounding_mode="floor").unsqueeze(-1)
+            labels = indices % 1 # 得到标签
+            boxes = torch.gather(bboxes, 0, topk_boxes.repeat(1, 7))
             return labels + 1, boxes, topk_boxes
 
         new_ret_dict = []
         for i in range(batch_size):
-            out_prob_i = out_prob[i] # （1000，）
-            out_bbox_i = out_bbox[i] # (1000, 7)
+            out_prob_i = out_prob[i][0] # （1000，）
+            out_bbox_i = out_bbox[i][0] # (1000, 7)
 
             '''
             # out_prob_i_ori = out_prob_i.view(out_bbox_i.shape[0], -1)  # [1000, 3]
@@ -640,7 +668,7 @@ class CQCPFeatureHead(nn.Module):
             target_single['labels'] = valid_labels
             targets_single.append(target_single)
 
-        for batch_idx in range(len(gt_bboxes_3d)): # 遍历每个样本
+        for batch_idx in range(len(gt_bboxes_3d)): # 遍历每个样本 这个为batch size 大小 比如 6
             target = {}
             gt_bboxes = gt_bboxes_3d[batch_idx] # (max_num, 7)
             gt_bboxes_mask = gt_bboxes_3d_mask[batch_idx] # (max_num, )
@@ -663,14 +691,14 @@ class CQCPFeatureHead(nn.Module):
         # for k, v in enc_losses.items():
         #     loss_dict.update({k + "_debug": v})
         outputs = pred_dicts['outputs']
-        dec_losses = self.compute_losses(outputs, targets, dn_meta)
+        dec_losses = self.compute_losses(outputs, targets_single, dn_meta) # 这里注意是单车标签，因为我们先运行单车pipeline
         for k, v in dec_losses.items():
             loss_all += v
             loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
 
         # compute contrastive loss
         if dn_meta is not None:
-            per_gt_num = [tgt["gt_boxes"].shape[0] for tgt in targets] # [n1, n2, ...]
+            per_gt_num = [tgt["gt_boxes"].shape[0] for tgt in targets_single] # [n1, n2, ...]
             max_gt = max(per_gt_num)
             num_gts = sum(per_gt_num)
             if num_gts > 0:
@@ -707,10 +735,32 @@ class CQCPFeatureHead(nn.Module):
                     loss_all += loss_contrastive_dec_li
                     loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
 
-        pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
-        loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d_single.to(torch.float32), gt_bboxes_3d_mask_single, None) # 前景预测损失
-        loss_all += loss_score
-        loss_dict.update({'loss_score': loss_score.item()})
+        fused_dict = {}
+        bs = len(outputs["fused_logits"]) # len([(1,n1_all,1), (1,n2_all,1)...])
+        # print("outputs['fused_logits'][0] shape is ", outputs["fused_logits"][0].shape)
+        # print("targets len is: ", len(targets))   print is 6
+
+        for bi in range(bs):
+            fused_outputs = {
+                "pred_logits": outputs["fused_logits"][bi],
+                "pred_boxes": outputs["fused_boxes"][bi]
+            }
+            
+            fused_losses = self.compute_losses(fused_outputs, [targets[bi]])
+            for k, v in fused_losses.items():
+                if k not in fused_dict:
+                    fused_dict[k] = 0
+                else:
+                    fused_dict[k] += v
+        for k, v in fused_dict.items():
+            v_mean = v / bs
+            loss_all += v_mean
+            loss_dict.update({k + '_fused': v.item()})
+
+        # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
+        # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d_single.to(torch.float32), gt_bboxes_3d_mask_single, None) # 前景预测损失
+        # loss_all += loss_score
+        # loss_dict.update({'loss_score': loss_score.item()})
 
         return loss_all, loss_dict
 
