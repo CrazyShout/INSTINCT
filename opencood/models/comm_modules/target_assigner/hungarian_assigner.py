@@ -67,13 +67,14 @@ def generalized_box3d_iou(boxes1, boxes2):
 
 
 class HungarianMatcher3d(nn.Module):
-    def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, cost_rad: float = 1):
+    def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, cost_rad: float = 1, decode_func=None):
         super().__init__()
         self.cost_class = cost_class                # 1.0
         self.cost_bbox = cost_bbox                  # 4.0
         self.cost_giou = cost_giou                  # 2.0
         self.cost_rad = cost_rad                    # 4.0
 
+        self.decode_fuc = decode_func
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0 or cost_rad != 0, "all costs cant be 0"
 
     @torch.no_grad()
@@ -153,6 +154,35 @@ class HungarianMatcher3d(nn.Module):
             C_i = C_i.view(num_queries, -1).cpu()
             indice = linear_sum_assignment(C_i) # 匈牙利匹配算法找到最小成本匹配，返回的是一个元组，两个元素都是数组，分别表示最佳匹配的行/列索引
             indices.append(indice) # 批次结果
+
+            # for debug  TODO 加载训练的权重发现，IOU 发现匹配后仍有为0的情况，这是误检？
+            # from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
+            # import numpy as np
+            # pred_boxes_debug = torch.cat([out_bbox_i, out_rad_i], dim=1)
+            # gt_boxes_debug = torch.cat([tgt_bbox_i, tgt_rad_i], dim=1)
+            # pred_boxes_debug = self.decode_fuc(pred_boxes_debug)
+            # gt_boxes_debug = self.decode_fuc(gt_boxes_debug)
+            
+            # indices_row = torch.from_numpy(np.array(indice[0]))
+            # indices_col = torch.from_numpy(np.array(indice[1]))
+            # print("indices_row  is ", indices_row)
+            # print("indices_col  is ", indices_col)
+            # print("pred_boxes_debug shape is ", pred_boxes_debug.shape)
+            # print("gt_boxes_debug shape is ", gt_boxes_debug.shape)
+
+            # pred_boxes_debug_matched = pred_boxes_debug[indices_row]
+            # gt_boxes_debug_matched = gt_boxes_debug[indices_col]
+            # ious = iou3d_nms_utils.boxes_iou3d_gpu(pred_boxes_debug_matched, gt_boxes_debug_matched)
+            
+            # print("ious shape is ", ious.shape)
+            # ious = torch.diag(ious).detach()
+            # print("ious  is ", ious)
+
+            # print("out_prob_i shape is ", out_prob_i.shape)
+            # print("tgt_bbox_i shape is ", tgt_bbox_i.shape)
+            # print("C_i shape is ", C_i.shape)
+            # print("indice  is ", indice)
+            # xxx
 
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices] # 索引数组变张量 由于gt数量远小于object query数量
 

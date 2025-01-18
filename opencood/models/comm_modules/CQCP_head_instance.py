@@ -998,14 +998,16 @@ class CQCPInstanceHead(nn.Module):
         return [{"pred_logits": a, "pred_boxes": b} for a, b in
                 zip(outputs_class, outputs_coord)]
 
+# vfl loss
 class VariFocalLoss(nn.Module):
-    def __init__(self, focal_alpha):
+    def __init__(self, focal_alpha, decode_func=None):
         super().__init__()
         self.focal_alpha = focal_alpha
         self.target_classes = None
         self.src_logits = None
         self.alpha = 0.25
         self.gamma = 2.0
+        self.decode_func = decode_func
 
     def forward(self, outputs, targets, indices, num_boxes):
         outputs["matched_indices"] = indices
@@ -1016,6 +1018,7 @@ class VariFocalLoss(nn.Module):
         idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
 
         target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+        target_boxes = self.decode_func(target_boxes)
 
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
 
@@ -1030,6 +1033,7 @@ class VariFocalLoss(nn.Module):
             target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
 
             src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
@@ -1040,6 +1044,7 @@ class VariFocalLoss(nn.Module):
             # N, L, C
             target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
             src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
@@ -1068,13 +1073,14 @@ class VariFocalLoss(nn.Module):
 
 # mal loss
 class MatchabilityAwareLoss(nn.Module):
-    def __init__(self, focal_alpha):
+    def __init__(self, focal_alpha, decode_func=None):
         super().__init__()
         self.focal_alpha = focal_alpha
         self.target_classes = None
         self.src_logits = None
         self.mal_alpha = None
         self.gamma = 1.5
+        self.decode_func = decode_func
 
     def forward(self, outputs, targets, indices, num_boxes):
         outputs["matched_indices"] = indices
@@ -1085,6 +1091,7 @@ class MatchabilityAwareLoss(nn.Module):
         idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
 
         target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+        target_boxes = self.decode_func(target_boxes)
 
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
         # print("indices is ", indices)
@@ -1102,7 +1109,11 @@ class MatchabilityAwareLoss(nn.Module):
             target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
 
             src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            # print("outputs['pred_boxes'] shape ", outputs['pred_boxes'].shape)
+            # print("ious shape ", ious.shape)
+
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx[0], topk_indexes[idx].squeeze(-1)] = ious.to(target_score_o.dtype) # (B, HW)
             # print('sum target is ', target_classes_onehot.sum())
@@ -1113,10 +1124,16 @@ class MatchabilityAwareLoss(nn.Module):
             # N, L, C
             target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
             src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
 
+        # print("------------------------------------------------------------------------------------")
+        # print("target_score_o shape ", target_score_o.shape)
+        # print("target_classes_onehot shape ", target_classes_onehot.shape)
+        # print("ious shape ", ious.shape)
+        # print("ious ==> ", ious)
 
         target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
 
@@ -1140,6 +1157,10 @@ class MatchabilityAwareLoss(nn.Module):
         losses = {
             "loss_ce": loss_ce,
         }
+        # print("weight ==> ", weight)
+        # print("loss_ce ==> ", loss_ce)
+        # xxx
+        # print("------------------------------------------------------------------------------------")
 
         return losses
 
