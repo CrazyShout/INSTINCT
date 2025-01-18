@@ -1,4 +1,4 @@
-name: dairv2x_ConQueR_lidar_late_fusion_second_onecycle
+name: dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_malcost2.0
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -125,6 +125,8 @@ model:
         upsample_strides: [ 1, 2 ]
         num_upsample_filter: [ 256, 256 ]
 
+        resnet: True
+        inplanes: 256
     dense_head:
         name: ConQueRHead
 
@@ -159,7 +161,7 @@ model:
 
         target_assigner_config:
             hungarian_assigner:
-                cls_cost: 1.0
+                cls_cost: 2.0
                 bbox_cost: 4.0
                 iou_cost: 2.0
                 rad_cost: 4.0

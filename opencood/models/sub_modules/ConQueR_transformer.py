@@ -49,7 +49,7 @@ class Transformer(nn.Module):
         self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
         decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers)
-
+        self.sample_idx = 0
     def _create_ref_windows(self, tensor_list):
         device = tensor_list[0].device
 
@@ -121,6 +121,60 @@ class Transformer(nn.Module):
 
         memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors)
         query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors)
+
+        # H, W = src_shape[0,0], src_shape[0,1]
+        # memory_vis = torch.zeros_like(memory).to(memory) # (B, HW, C)
+        # fined_query = torch.gather(memory, 1, topk_indexes.expand(-1, -1, memory.shape[-1]))
+        # memory_vis = memory_vis.scatter(1, topk_indexes.repeat(1, 1, memory_vis.size(-1)), fined_query)
+        # memory_copy = copy.deepcopy(memory)
+        # memory_copy = memory_copy.permute(0, 2, 1).reshape(memory.shape[0], 256, H, W)
+        # memory_vis = memory_vis.permute(0, 2, 1).reshape(memory_vis.shape[0], 256, H, W)
+
+        # import matplotlib.pyplot as plt
+        # import os
+        # if self.sample_idx % 20 == 0:
+        #     save_dir = "./feature_vis_res_300query"
+        #     os.makedirs(save_dir, exist_ok=True)
+        #     for b in range(B):
+        #         # confidence = memory[b, 7, :, :] # (H, W)
+        #         # mask = (confidence > 0.25).float()
+        #         # mask = mask.unsqueeze(1)
+        #         feature_map = memory_copy[b] # 
+        #         feature_map = feature_map.mean(dim=0) # (H, W)
+        #         feature_discrete = memory_vis[b]
+        #         feature_discrete = feature_discrete.mean(dim=0) # (H, W)
+
+        #         # feature_mask = mask
+
+        #         # 将特征图归一化到 [0, 255]
+        #         def normalize_to_image(tensor):
+        #             tensor = tensor - tensor.min()
+        #             tensor = tensor / tensor.max()
+        #             return (tensor * 255).byte()
+                
+        #         dense_feature = normalize_to_image(feature_map)
+        #         feature_discrete = normalize_to_image(feature_discrete)
+        #         # 转为 NumPy 格式
+        #         dense_feature_np = dense_feature.cpu().numpy()
+        #         feature_mask_np = feature_discrete.cpu().numpy()
+
+        #         # 创建可视化画布
+        #         fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+        #         axes[0].imshow(dense_feature_np, cmap="viridis")
+        #         axes[0].set_title("Dense Feature")
+        #         axes[0].axis("off")
+        #         axes[1].imshow(feature_mask_np, cmap="viridis")
+        #         axes[1].set_title("Sparse Mask")
+        #         axes[1].axis("off")
+
+        #         # plt.figure(figsize=(20, 10))
+        #         # plt.imshow(dense_feature_np, cmap="viridis")
+        #         # plt.axis("off")
+
+        #         # 保存到文件
+        #         plt.savefig(os.path.join(save_dir, f"feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+        #         plt.close() 
+        # self.sample_idx += 1
 
         if noised_gt_box is not None:
             noised_gt_proposals = torch.cat(

@@ -71,11 +71,11 @@ def id_to_str(id, digits=6):
         id //= 10
     return result
 
-def getIntermediatev2FusionDataset(cls):
+def getIntermediatev2augFusionDataset(cls):
     """
     cls: the Basedataset.
     """
-    class IntermediateV2FusionDataset(cls):
+    class IntermediateV2AugFusionDataset(cls):
         def __init__(self, params, visualize, train=True):
             # super().__init__(params, visualize, train) 不需要
             # intermediate and supervise single
@@ -161,6 +161,9 @@ def getIntermediatev2FusionDataset(cls):
             self.split_info = self.data
             self.co_data = self.co_idx2info
             # self.db_num = 0
+            self.fade = True # 在最后几个epoch会开启用于调整对于test中的数据分布的适应
+            if self.fade:
+                print("===Fade strategy===")
 
             # co_datainfo = read_json(os.path.join(self.root_dir, 'cooperative/data_info.json'))
             # self.co_data = OrderedDict()
@@ -247,7 +250,14 @@ def getIntermediatev2FusionDataset(cls):
 
                 # data augmentation for single
                 if selected_cav_base['ego']:
-                    lidar_np, object_bbx_center, object_bbx_mask = self.augment(lidar_np, object_bbx_center, object_bbx_mask)
+                    if self.fade is False:
+                        lidar_np, object_bbx_center, object_bbx_mask, sampled_boxes = self.augment(lidar_np, object_bbx_center, object_bbx_mask, return_sampled_boxes=True,
+                                                                                    flip=selected_cav_base['flip'],
+                                                                                    rotation=selected_cav_base['noise_rotation'],
+                                                                                    scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
+                    else:
+                        lidar_np = lidar_np
+                                                                                
                     projected_lidar = copy.deepcopy(lidar_np)[:,:3] # 只有单车 不必空间变换
                 else:
                     print('fuck!')
@@ -266,9 +276,7 @@ def getIntermediatev2FusionDataset(cls):
                 processed_lidar = self.pre_processor.preprocess(lidar_np)
                 selected_cav_processed.update({'processed_features': processed_lidar})
 
-            selected_cav_processed.update({
-                                "single_object_bbx_center": object_bbx_center,
-                                "single_object_bbx_mask": object_bbx_mask})
+
 
             # camera
             if self.load_camera_file:
@@ -368,6 +376,25 @@ def getIntermediatev2FusionDataset(cls):
                 }
             )
 
+            # 协同的性能用协同标签去监督，而单车标签仍用单车标签，注意将协同标签中加入的sampled gt给补到单车标签中，因为点云已经发生变化了
+            object_bbx_center, object_bbx_mask, _ = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
+                [selected_cav_base], selected_cav_base['params']['lidar_pose']
+            )
+            if self.fade is False:
+                # 做数据增强的原因是存在翻转、旋转以及缩放，这些是在协同标签以及点云上做了的，所以要把单车标签也操作一下，这只针对single 标签，因此点云随意传入即可，返回也用不到
+                _, object_bbx_center, object_bbx_mask = self.augment(lidar_np, object_bbx_center, object_bbx_mask, choice=1, # 单车不需要GT sampling，直接将协同中sample的加入就行，所以跳过
+                                                                                            flip=selected_cav_base['flip'],
+                                                                                            rotation=selected_cav_base['noise_rotation'],
+                                                                                            scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
+                # 车端single只需要将多出来的gt拼起来即可
+                gt_boxes_valid = object_bbx_center[object_bbx_mask == 1]
+                gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_boxes], axis=0)
+                object_bbx_center[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
+                object_bbx_mask[:gt_boxes_valid.shape[0]] = 1
+
+            selected_cav_processed.update({
+                                "single_object_bbx_center": object_bbx_center,
+                                "single_object_bbx_mask": object_bbx_mask})
 
             return selected_cav_processed
 
@@ -401,8 +428,8 @@ def getIntermediatev2FusionDataset(cls):
             # calculate the transformation matrix for inf
             transformation_matrix_inf = x1_to_x2(selected_inf_base['params']['lidar_pose'], ego_pose) 
             transformation_matrix_clean_inf = x1_to_x2(selected_inf_base['params']['lidar_pose_clean'], ego_pose_clean)
-            # TODO 以下是针对DairV2X特异化处理的，需要修改以支持别的数据集
-            # selected_inf_base['params']['vehicles_all'] = selected_cav_base['params']['vehicles_all'] # 这里必须要把协同标签拿过来，因为在Dair中只有车端有协同标签
+            # TODO 以下是针对DairV2X特异化处理的，因为协同标签只加载在车端，但是路端也需要处理，注意，这个后面要回退，因为在推理时生成GT会用两者标签并集去重，协同标签确实只用加载在车端
+            selected_inf_base['params']['vehicles_all'] = selected_cav_base['params']['vehicles_all'] # 这里必须要把协同标签拿过来，因为在Dair中只有车端有协同标签
             inf_bbx_center, inf_bbx_mask, inf_ids = self.generate_object_center([selected_inf_base], ego_pose_clean)
 
             # lidar
@@ -421,7 +448,13 @@ def getIntermediatev2FusionDataset(cls):
                 projected_lidar_cav = box_utils.project_points_by_matrix_torch(lidar_np_cav[:, :3], transformation_matrix_cav)# project the lidar to ego space
                 lidar_proj_np_cav = copy.deepcopy(lidar_np_cav)
                 lidar_proj_np_cav[:,:3] = projected_lidar_cav # 点云变为投影后的点云 这里使用的是协同标签
-                lidar_np_cav, cav_bbx_center, cav_bbx_mask = self.augment(lidar_proj_np_cav, cav_bbx_center, cav_bbx_mask, random_seed) #choice=1 skip gt_sampling
+                if self.fade is False:
+                    lidar_np_cav, cav_bbx_center, cav_bbx_mask, sampled_boxes_cav = self.augment(lidar_proj_np_cav, cav_bbx_center, cav_bbx_mask, random_seed, stay_staic=True, return_sampled_boxes=True,
+                                                                                                flip=selected_cav_base['flip'],
+                                                                                                rotation=selected_cav_base['noise_rotation'],
+                                                                                                scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
+                else:
+                    lidar_np_cav = lidar_proj_np_cav
                 # print("cav_bbx_center[cav_bbx_mask == 1] shape is ", cav_bbx_center[cav_bbx_mask == 1].shape)
 
                 projected_lidar_inf = box_utils.project_points_by_matrix_torch(lidar_np_inf[:, :3], transformation_matrix_inf)# project the lidar to ego space
@@ -429,8 +462,14 @@ def getIntermediatev2FusionDataset(cls):
                 lidar_proj_np_inf[:,:3] = projected_lidar_inf
                 # print("before aug lidar_proj_np_inf shape is ", lidar_proj_np_inf.shape)
                 # print("before aug inf_bbx_center[inf_bbx_mask == 1] shape is ", inf_bbx_center[inf_bbx_mask == 1].shape)
-                # 路端不需要增强，本质上是ego在做协同 所以只增强ego的gt
-                lidar_np_inf, inf_bbx_center, inf_bbx_mask = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, choice=1) #choice=1 skip gt_sampling
+                # 路端不需要增强，本质上是ego在做协同 所以只增强ego的gt  协同标签被扩增，那路端single标签怎么办? TODO single 路端已经加入了采样的实例点云，那还需要把增加的box取回增加到单车
+                if self.fade is False:
+                    lidar_np_inf, inf_bbx_center, inf_bbx_mask, sampled_boxes_inf = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, return_sampled_boxes=True,
+                                                                                                flip=selected_cav_base['flip'],
+                                                                                                rotation=selected_cav_base['noise_rotation'],
+                                                                                                scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling                    
+                else:
+                    lidar_np_inf = lidar_proj_np_inf
                 # print("after aug inf_bbx_center[inf_bbx_mask == 1] shape is ", inf_bbx_center[inf_bbx_mask == 1].shape)
                 # print("after aug lidar_proj_np_inf shape is ", lidar_proj_np_inf.shape)
 
@@ -458,6 +497,8 @@ def getIntermediatev2FusionDataset(cls):
                 selected_cav_processed.update({'processed_features': processed_lidar_cav})
                 selected_inf_processed.update({'processed_features': processed_lidar_inf})
 
+            selected_inf_base['params']['vehicles_all'] = [] # 路端协同标签
+
             selected_cav_processed.update(
                 {
                     "object_bbx_center": cav_bbx_center[cav_bbx_mask == 1],
@@ -482,12 +523,40 @@ def getIntermediatev2FusionDataset(cls):
             而other agents 我们使用其自身的single 标签
             '''
             # generate targets label single GT, note the reference pose is itself. XXX 不太理解，按理说是用来监督单车的，但是generate_object_center其实用的协同标签
-            # cav_bbx_center, cav_bbx_mask, cav_ids = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
-            #     [selected_cav_base], selected_cav_base['params']['lidar_pose']
-            # )
-            inf_bbx_center, inf_bbx_mask, inf_ids = self.generate_object_center_single( # NOTE infra side 也要进行单车监督，需要其single label
+            cav_bbx_center, cav_bbx_mask, _ = self.generate_object_center_single( # FIXME 对比了一下where2comm的源码，这里似乎确实有问题, 测试where2comm这种需要单车监督的模型要小心
+                [selected_cav_base], selected_cav_base['params']['lidar_pose']
+            )
+            inf_bbx_center, inf_bbx_mask, _ = self.generate_object_center_single( # NOTE infra side 也要进行单车监督，需要其single label
                 [selected_inf_base], selected_inf_base['params']['lidar_pose']
             )
+            if self.fade is False:
+                # 做数据增强的原因是存在翻转、旋转以及缩放，这些是在协同标签以及点云上做了的，所以要把单车标签也操作一下，这只针对single 标签，因此点云随意传入即可，返回也用不到
+                _, cav_bbx_center, cav_bbx_mask = self.augment(lidar_np_cav, cav_bbx_center, cav_bbx_mask, random_seed, choice=1,
+                                                                                            flip=selected_cav_base['flip'],
+                                                                                            rotation=selected_cav_base['noise_rotation'],
+                                                                                            scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
+                _, inf_bbx_center, inf_bbx_mask = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, choice=1,
+                                                                                            flip=selected_cav_base['flip'],
+                                                                                            rotation=selected_cav_base['noise_rotation'],
+                                                                                            scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
+                # 车端single只需要将多出来的gt拼起来即可
+                gt_boxes_valid = cav_bbx_center[cav_bbx_mask == 1]
+                gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_boxes_cav], axis=0)
+                cav_bbx_center[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
+                cav_bbx_mask[:gt_boxes_valid.shape[0]] = 1
+
+                # 路端single首先要变换回去，然后判断范围，最后仍旧保留才会拼接到路端single的标签
+                gt_boxes_valid = inf_bbx_center[inf_bbx_mask == 1]
+                if sampled_boxes_inf.size(0) > 0:
+                    sampled_boxes_corner_inf = box_utils.boxes_to_corners_3d(sampled_boxes_inf, 'lwh')
+                    projected_sampled_boxes_corner_inf = box_utils.project_box3d(sampled_boxes_corner_inf.float(), transformation_matrix_inf_inv)
+                    mask = box_utils.get_mask_for_boxes_within_range_torch(projected_sampled_boxes_corner_inf, self.params['postprocess']['gt_range'])
+                    projected_sampled_boxes_corner_inf = projected_sampled_boxes_corner_inf[mask, :, :]
+                    sampled_boxes_inf = box_utils.corners_to_boxes_3d(projected_sampled_boxes_corner_inf, 'lwh') # (extra_num, 7)
+                gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_boxes_inf], axis=0)
+                inf_bbx_center[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
+                inf_bbx_mask[:gt_boxes_valid.shape[0]] = 1
+
             # _, inf_bbx_center, inf_bbx_mask = self.augment(lidar_proj_np_inf, inf_bbx_center, inf_bbx_mask, random_seed, choice=1)
 
             selected_cav_processed.update({
@@ -589,7 +658,7 @@ def getIntermediatev2FusionDataset(cls):
             noise_rotation = None
             noise_scale = None
 
-            for aug_ele in self.augment_config:
+            for aug_ele in self.params['data_augment']:
                 # for intermediate fusion only
                 if 'random_world_rotation' in aug_ele['NAME']:
                     rot_range = \
@@ -621,7 +690,7 @@ def getIntermediatev2FusionDataset(cls):
             processed_data_dict['ego'] = {}
 
             # augmentation related
-            # flip, noise_rotation, noise_scale = self.generate_augment()
+            flip, noise_rotation, noise_scale = self.generate_augment()
 
             ego_id = -1
             ego_lidar_pose = []
@@ -726,6 +795,9 @@ def getIntermediatev2FusionDataset(cls):
             
             if cav_num == 1:
                 selected_cav_base = base_data_dict[0] # ego的 信息
+                selected_cav_base['flip'] = flip
+                selected_cav_base['noise_rotation'] = noise_rotation
+                selected_cav_base['noise_scale'] = noise_scale
                 selected_cav_processed = self.get_item_single_car(selected_cav_base, ego_cav_base)
                     
                 object_stack.append(selected_cav_processed['object_bbx_center'])
@@ -740,6 +812,9 @@ def getIntermediatev2FusionDataset(cls):
                     single_object_bbx_center_list.append(selected_cav_processed['single_object_bbx_center'])
                     single_object_bbx_mask_list.append(selected_cav_processed['single_object_bbx_mask'])
             else:
+                base_data_dict[0]['flip'] = flip
+                base_data_dict[0]['noise_rotation'] = noise_rotation
+                base_data_dict[0]['noise_scale'] = noise_scale
                 selected_cav_processed, selected_inf_processed = self.get_item_all_agent(base_data_dict[0], base_data_dict[1], ego_cav_base)           
                 object_stack.append(selected_cav_processed['object_bbx_center'])
                 object_stack.append(selected_inf_processed['object_bbx_center'])
@@ -1042,6 +1117,6 @@ def getIntermediatev2FusionDataset(cls):
             return pred_box_tensor, pred_score, gt_box_tensor
 
 
-    return IntermediateV2FusionDataset
+    return IntermediateV2AugFusionDataset
 
 

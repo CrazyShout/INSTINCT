@@ -12,8 +12,9 @@ from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
 from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
-from opencood.models.sub_modules.TrasIFF_transformer import TransformerInstance, MLP, get_clones
-
+from opencood.models.sub_modules.TrasIFF_transformer import TransformerInstance,TransformerInstanceV1, MLP, get_clones
+from opencood.models.comm_modules.gaussian import draw_heatmap_gaussian, gaussian_radius
+from opencood.models.comm_modules.gaussian_focal_loss import GaussianFocalLoss
 
 def inverse_sigmoid(x, eps=1e-5):
     x = x.clamp(min=0, max=1)
@@ -21,6 +22,19 @@ def inverse_sigmoid(x, eps=1e-5):
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
 
+def clip_sigmoid(x, eps=1e-4):
+    """Sigmoid function for input feature.
+
+    Args:
+        x (torch.Tensor): Input feature map with the shape of [B, N, H, W].
+        eps (float): Lower bound of the range to be clamped to. Defaults
+            to 1e-4.
+
+    Returns:
+        torch.Tensor: Feature map after sigmoid.
+    """
+    y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
+    return y
 
 class PositionEmbeddingSine(nn.Module):
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
@@ -95,6 +109,29 @@ class Det3DHead(nn.Module):
 
         # pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
         return cls_logits, box_coords
+
+
+class HeatMap(nn.Module):
+    def __init__(self, hidden_channel, num_classes):
+        super(HeatMap, self).__init__()
+
+        # 第一个卷积层：卷积 -> 批归一化 -> 激活
+        self.conv1 = nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(hidden_channel)
+        self.relu = nn.ReLU(inplace=True)
+
+        # 输出的卷积层，将隐藏通道数映射到类别数
+        self.conv2 = nn.Conv2d(hidden_channel, num_classes, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x):
+        # 卷积 -> 批归一化 -> 激活
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        # 最后的卷积层，生成类别数的热图
+        x = self.conv2(x)
+        return x
 
 
 class MaskPredictor(nn.Module):
@@ -179,8 +216,9 @@ class CQCPInstanceHead(nn.Module):
                     nn.init.constant_(module.bias, 0)
 
         # self.mask_predictor = MaskPredictor(self.hidden_channel)
+        # self.heatmap_head = HeatMap(self.hidden_channel, self.num_classes)
 
-        self.transformer = TransformerInstance(
+        self.transformer = TransformerInstanceV1(
             d_model=self.hidden_channel, # 256
             nhead=num_heads, # 8
             nlevel=1,
@@ -271,7 +309,9 @@ class CQCPInstanceHead(nn.Module):
                     aux_weight_dict.update({k + f"_{i}": v for k, v in self.losses.weight_dict.items()})
                 self.losses.weight_dict.update(aux_weight_dict)
 
-        # self.parameters_fix()
+        # self.loss_heatmap = GaussianFocalLoss()
+
+        self.parameters_fix()
 
     def parameters_fix(self):
         for p in self.input_proj.parameters():
@@ -306,6 +346,17 @@ class CQCPInstanceHead(nn.Module):
         pos_encodings.append(self.pos_embed(spatial_features_2d)) # 位置编码 B_n，256， H， W
 
         # score_mask = self.mask_predictor(features[0]) # B, H, W
+
+        heatmap = dense_heatmap = None
+        # dense_heatmap = self.heatmap_head(features[0]) # (Bn, 1, H, W)
+        # heatmap = dense_heatmap.detach().sigmoid()
+        # padding = 3 // 2
+        # local_max = torch.zeros_like(heatmap)
+        # # equals to nms radius = voxel_size * out_size_factor * kenel_size
+        # local_max_inner = F.max_pool2d(heatmap, kernel_size=3, stride=1, padding=0)  # (Bn, num_classes, H-2, W-2)
+        # local_max[:, :, padding:(-padding), padding:(-padding)] = local_max_inner # 填充中间区域 (Bn, num_classes, H, W)
+        # heatmap = heatmap * (heatmap == local_max) # (B, 1, H, W)
+        # # heatmap = heatmap.view(Bn, -1) # (B, HW)
 
         dn = self.dn
         if self.train_flag and dn['enabled'] and dn['dn_number'] > 0:
@@ -355,6 +406,7 @@ class CQCPInstanceHead(nn.Module):
             record_len=record_len,
             pairwise_t_matrix=pairwise_t_matrix,
             pairwise_t_matrix_ref=pairwise_t_matrix_ref,
+            heatmap = heatmap
         )
         '''
         1️⃣outputs:
@@ -436,13 +488,14 @@ class CQCPInstanceHead(nn.Module):
 
         # compute decoder losses
         outputs = {
-            # "pred_scores_mask": score_mask, # (B, H, W)
-            
+            # "pred_scores_mask": score_mask, # (Bn, H, W)
+
             "pred_logits": outputs_class[-1][:, : self.num_queries],    # (B, all_query_num, 1) # 最后一层
             "pred_boxes": outputs_coord[-1][:, : self.num_queries],     # (B, all_query_num, 7)
             "aux_outputs": self._set_aux_loss(
                 outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
             ),
+            "dense_heatmap": dense_heatmap, # (Bn, 1, H, W)
             "fused_logits": fused_logits_lst,
             "fused_boxes": fused_boxes_lst,
         }
@@ -493,6 +546,13 @@ class CQCPInstanceHead(nn.Module):
 
         out_prob = [logits.sigmoid().view(1, -1) for logits in out_logits] # 每个(1, n)
         out_bbox = [self.decode_bbox(box) for box in out_bbox]
+
+
+        # outputs = pred_dicts['outputs']
+        # out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
+        # out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
+        # batch_size = out_logits.shape[0]
+
         # out_prob = out_logits.sigmoid()
         # out_prob = out_prob.view(out_logits.shape[0], -1) # (B, 1000)
         # out_bbox = self.decode_bbox(out_bbox)
@@ -507,6 +567,9 @@ class CQCPInstanceHead(nn.Module):
         for i in range(batch_size):
             out_prob_i = out_prob[i][0] # （1000，）
             out_bbox_i = out_bbox[i][0] # (1000, 7)
+
+            # out_prob_i = out_prob[i] # （1000，）
+            # out_bbox_i = out_bbox[i] # (1000, 7)
 
             '''
             # out_prob_i_ori = out_prob_i.view(out_bbox_i.shape[0], -1)  # [1000, 3]
@@ -565,7 +628,7 @@ class CQCPInstanceHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.2, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.25, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
@@ -685,16 +748,17 @@ class CQCPInstanceHead(nn.Module):
         bin_targets = copy.deepcopy(targets_single)
         # [tgt["labels"].fill_(0) for tgt in bin_targets] NOTE 这个是Github Issue提出的，注释掉后带来了0.2-0.3的提升，这是为什么？ 如果不注释，其实就变成类别无关预测 答：其实这里就是ConQuer的代码中的设置 作者忘删除了，seed 中的dqs就是需要多分类的
         enc_losses = self.compute_losses(enc_outputs, bin_targets) # encoder的结果先作为detect输出监督 query 选择
-        for k, v in enc_losses.items():
-            loss_all += v
-            loss_dict.update({k + "_enc": v.item()})
+        # for k, v in enc_losses.items():
+        #     loss_all += v
+        #     loss_dict.update({k + "_enc": v.item()})
+
         # for k, v in enc_losses.items():
         #     loss_dict.update({k + "_debug": v})
         outputs = pred_dicts['outputs']
         dec_losses = self.compute_losses(outputs, targets_single, dn_meta) # 这里注意是单车标签，因为我们先运行单车pipeline
-        for k, v in dec_losses.items():
-            loss_all += v
-            loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
+        # for k, v in dec_losses.items():
+        #     loss_all += v
+        #     loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
 
         # compute contrastive loss
         if dn_meta is not None:
@@ -732,13 +796,13 @@ class CQCPInstanceHead(nn.Module):
                             ) # （3， 1） 
                             contrastive_loss += loss_gti.mean() # 3组gt对比，求均值再加上去
                     loss_contrastive_dec_li = self.contras_loss_coeff * contrastive_loss / num_gts # 乘上系数=0.2后要除以gt总数，以均衡不同样本的gt数不同引起的数值波动
-                    loss_all += loss_contrastive_dec_li
-                    loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
+                    # loss_all += loss_contrastive_dec_li
+                    # loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
 
         fused_dict = {}
         bs = len(outputs["fused_logits"]) # len([(1,n1_all,1), (1,n2_all,1)...])
         # print("outputs['fused_logits'][0] shape is ", outputs["fused_logits"][0].shape)
-        # print("targets len is: ", len(targets))   print is 6
+        # print("targets len is: ", len(targets))   # print is 6
 
         for bi in range(bs):
             fused_outputs = {
@@ -762,6 +826,23 @@ class CQCPInstanceHead(nn.Module):
         # loss_all += loss_score
         # loss_dict.update({'loss_score': loss_score.item()})
 
+        heatmap_pred = outputs.get("dense_heatmap", None)
+        if heatmap_pred is not None:
+            heatmaps = []
+            for batch_idx in range(len(gt_bboxes_3d_single)): # 遍历 (Bn, maxnum, 7)
+                gt_bboxes = gt_bboxes_3d_single[batch_idx] # (max_num, 7)
+                gt_bboxes_mask = gt_bboxes_3d_mask_single[batch_idx] # (max_num, )
+                gt_labels = gt_labels_3d_single[batch_idx] # (max_num, )
+
+                valid_bboxes = gt_bboxes[gt_bboxes_mask.bool()] # (n, 7)
+                valid_labels = gt_labels[gt_bboxes_mask.bool()]
+
+                heatmap = self.compute_dense_heatmap_targets(valid_bboxes.to(torch.float32), valid_labels)
+                heatmaps.append(heatmap) # (1, 1, H, W)
+            heatmaps = torch.cat(heatmaps, dim=0) # (Bn, 1, H, W)
+            loss_heatmap = self.loss_heatmap(clip_sigmoid(heatmap_pred), heatmaps, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            loss_all += loss_heatmap
+            loss_dict.update({'loss_heatmap': loss_heatmap.item()})
         return loss_all, loss_dict
 
     def encode_bbox(self, bboxes): # 输入的是n, 7
@@ -884,10 +965,183 @@ class CQCPInstanceHead(nn.Module):
         # self.sample_idx += 1
         return sparse_features
 
+    def compute_dense_heatmap_targets(self, gt_bboxes_3d, gt_labels_3d):
+        '''
+        生成高斯热力图
+        '''
+        gt_bboxes_3d = copy.deepcopy(gt_bboxes_3d)
+        grid_size = torch.ceil(torch.from_numpy(self.grid_size).to(gt_bboxes_3d) / self.feature_map_stride) # 空间八倍下采样后的尺寸 [252, 100, 50/8]
+        pc_range = torch.from_numpy(np.array(self.point_cloud_range)).to(gt_bboxes_3d) # [-100.8, -40, -3.5, 100.8, 40, 1.5] 点云尺寸
+        voxel_size = self.voxel_size
+        feature_map_size = grid_size.to(torch.int)
+        # print("feature_map_size is ", feature_map_size)
+        heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1], feature_map_size[0]) # (1, 100, 252)
+        for idx in range(len(gt_bboxes_3d)): # 遍历每一个gt
+            width = gt_bboxes_3d[idx][3]
+            length = gt_bboxes_3d[idx][4]
+            width = width / voxel_size[0] / self.feature_map_stride
+            length = length / voxel_size[1] / self.feature_map_stride
+            if width > 0 and length > 0:
+                radius = gaussian_radius((length, width), min_overlap=0.1)
+                radius = max(2, int(radius)) # 最小半径是2
+                x, y = gt_bboxes_3d[idx][0], gt_bboxes_3d[idx][1]
+
+                coor_x = (x - pc_range[0]) / voxel_size[0] / self.feature_map_stride # 在heatmap中的位置
+                coor_y = (y - pc_range[1]) / voxel_size[1] / self.feature_map_stride
+
+                center = torch.tensor([coor_x, coor_y], dtype=torch.float32, device=gt_bboxes_3d.device)
+                center_int = center.to(torch.int32)
+                draw_heatmap_gaussian(heatmap[gt_labels_3d[idx]], center_int, radius)
+        return heatmap.unsqueeze(0) # (1, 1, H, W)
+
     def _set_aux_loss(self, outputs_class, outputs_coord):
         return [{"pred_logits": a, "pred_boxes": b} for a, b in
                 zip(outputs_class, outputs_coord)]
 
+class VariFocalLoss(nn.Module):
+    def __init__(self, focal_alpha):
+        super().__init__()
+        self.focal_alpha = focal_alpha
+        self.target_classes = None
+        self.src_logits = None
+        self.alpha = 0.25
+        self.gamma = 2.0
+
+    def forward(self, outputs, targets, indices, num_boxes):
+        outputs["matched_indices"] = indices
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"] # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        target_classes_onehot = torch.zeros_like(src_logits) # (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        
+        idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
+
+        target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
+
+        target_score_o = torch.zeros(target_classes_onehot.size(0), target_classes_onehot.size(1), dtype=src_logits.dtype, device=src_logits.device)
+
+        # for metrics calculation
+        self.target_classes = target_classes_o
+
+        if "topk_indexes" in outputs.keys(): # 这是dqs做损失要的，dqs也和最佳匹配的做损失，要求最佳匹配的query的置信度接近1
+            topk_indexes = outputs["topk_indexes"] # (B, 1000, 1) dqs结果索引
+            self.src_logits = torch.gather(src_logits, 1, topk_indexes.expand(-1, -1, src_logits.shape[-1]))[idx] # (B, 1000, 1)
+            target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
+
+            src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+            # print('sum target is ', target_classes_onehot.sum())
+        else:
+            self.src_logits = src_logits[idx]
+            # 0 for bg, 1 for fg
+            # N, L, C
+            target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
+            src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+
+        
+        target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
+
+        pred_score = F.sigmoid(src_logits).detach() # （B, HW, 1） det损失时为 (B, 1000, 1)
+        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_score
+
+        loss_ce = (
+                 F.binary_cross_entropy_with_logits(
+                    src_logits, # 预测，dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+                    target_score, # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 匹配上的query
+                    weight=weight,
+                    reduction="sum"
+                )
+                / num_boxes
+        ) # focal loss 取mean结果
+
+        losses = {
+            "loss_ce": loss_ce,
+        }
+
+        return losses
+
+# mal loss
+class MatchabilityAwareLoss(nn.Module):
+    def __init__(self, focal_alpha):
+        super().__init__()
+        self.focal_alpha = focal_alpha
+        self.target_classes = None
+        self.src_logits = None
+        self.mal_alpha = None
+        self.gamma = 1.5
+
+    def forward(self, outputs, targets, indices, num_boxes):
+        outputs["matched_indices"] = indices
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"] # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        target_classes_onehot = torch.zeros_like(src_logits) # (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        
+        idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
+
+        target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
+        # print("indices is ", indices)
+        # print("t['labels'] is ", targets[0]['labels'])
+        # print("target_classes_o is ", target_classes_o)
+
+        # for metrics calculation
+        self.target_classes = target_classes_o
+
+        target_score_o = torch.zeros(target_classes_onehot.size(0), target_classes_onehot.size(1), dtype=src_logits.dtype, device=src_logits.device) # (B, H*W) det损失时为 (B, 1000) 
+
+        if "topk_indexes" in outputs.keys(): # 这是dqs做损失要的，dqs也和最佳匹配的做损失，要求最佳匹配的query的置信度接近1
+            topk_indexes = outputs["topk_indexes"] # (B, 1000, 1) dqs结果索引
+            self.src_logits = torch.gather(src_logits, 1, topk_indexes.expand(-1, -1, src_logits.shape[-1]))[idx] # (B, 1000, 1)
+            target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
+
+            src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx[0], topk_indexes[idx].squeeze(-1)] = ious.to(target_score_o.dtype) # (B, HW)
+            # print('sum target is ', target_classes_onehot.sum())
+            # print('ious shape is ', ious.shape)
+        else:
+            self.src_logits = src_logits[idx]
+            # 0 for bg, 1 for fg
+            # N, L, C
+            target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
+            src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+
+
+        target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
+
+        pred_score = F.sigmoid(src_logits).detach() # （B, HW, 1） det损失时为 (B, 1000, 1)
+        target_score = target_score.pow(self.gamma) # NOTE paper上的公式应该是有笔误 
+        if self.mal_alpha != None:
+            weight = self.mal_alpha * pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_classes_onehot
+        else:
+            weight = pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_classes_onehot
+
+        loss_ce = (
+                 F.binary_cross_entropy_with_logits(
+                    src_logits, # 预测，dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+                    target_score, # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 匹配上的query
+                    weight=weight,
+                    reduction="sum"
+                )
+                / num_boxes
+        ) # mal loss 取mean结果
+
+        losses = {
+            "loss_ce": loss_ce,
+        }
+
+        return losses
 
 class ClassificationLoss(nn.Module):
     def __init__(self, focal_alpha):
@@ -932,8 +1186,8 @@ class ClassificationLoss(nn.Module):
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, )
         # print("indices is ", indices)
         # print("t['labels'] is ", targets[0]['labels'])
-        # print("target_classes_o is ", target_classes_o)
-
+        # print("target_classes_o shape is ", target_classes_o.shape) # torch.Size([143])
+        # xx
         # for metrics calculation
         self.target_classes = target_classes_o
 

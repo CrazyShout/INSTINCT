@@ -121,7 +121,7 @@ class DataBaseSampler(object):
 
         return db_infos
 
-    def sample_with_fixed_number(self, class_name, sample_group):
+    def sample_with_fixed_number(self, class_name, sample_group, stay_static = False):
         """
         Args:
             class_name:
@@ -134,7 +134,8 @@ class DataBaseSampler(object):
             indices = np.random.permutation(len(self.db_infos[class_name]))
             pointer = 0
         sampled_dict = [self.db_infos[class_name][idx] for idx in indices[pointer: pointer + sample_num]] # 随机采样十五个
-        pointer += sample_num
+        if stay_static is False: # 如果stay_static==True 那就不更新指针，这一般是用在ego确定sample的样本后，协同场景内其他agent也要保持同步
+            pointer += sample_num
         sample_group['pointer'] = pointer
         sample_group['indices'] = indices
         return sampled_dict
@@ -461,6 +462,8 @@ class DataBaseSampler(object):
         gt_boxes, gt_mask, points = data_dict['object_bbx_center'], \
                                     data_dict['object_bbx_mask'], \
                                     data_dict['lidar_np']
+        stay_static = data_dict['stay_static']
+        return_sampled_boxes = data_dict['return_sampled_boxes']
         gt_boxes_valid = gt_boxes[gt_mask == 1]
         # gt_boxes = data_dict['gt_boxes']
         # gt_names = data_dict['gt_names'].astype(str)
@@ -469,12 +472,12 @@ class DataBaseSampler(object):
         sampled_mv_height = []
         sampled_gt_boxes2d = []
 
-        for class_name, sample_group in self.sample_groups.items():
-            if self.limit_whole_scene:
-                num_gt =  gt_mask,sum() #np.sum(class_name == gt_names)
+        for class_name, sample_group in self.sample_groups.items(): # 采样组只有一个CAR类
+            if self.limit_whole_scene: # 这个就是限制整个感知范围内最多的object数，如果不够才会补sample
+                num_gt =  gt_mask.sum() #np.sum(class_name == gt_names)
                 sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
             if int(sample_group['sample_num']) > 0: # 15 即要采样的个数
-                sampled_dict = self.sample_with_fixed_number(class_name, sample_group) # [Dicrt1, Dict2...]采样固定个数的gt，默认是15个
+                sampled_dict = self.sample_with_fixed_number(class_name, sample_group, stay_static) # [Dicrt1, Dict2...]采样固定个数的gt，默认是15个
                 
                 # 我们在生成gt base的时候是用的lwh的顺序载入的，因此如果实际是hwl（比如之前的baseline），那就要在读出来的时候给它调整回去
                 if self.sampler_cfg['BOX_ORDER'] == 'hwl':
@@ -500,10 +503,11 @@ class DataBaseSampler(object):
 
                 valid_mask = valid_mask.nonzero()[0] # 返回的是元组，第一个元素是行索引
                 valid_sampled_dict = [sampled_dict[x] for x in valid_mask]
-                valid_sampled_boxes = sampled_boxes[valid_mask]
+                valid_sampled_boxes = sampled_boxes[valid_mask] # (15, 7) 中选出符合要求的 比如说(s, 7)
 
                 existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes[:, :existed_boxes.shape[-1]]), axis=0) # 更新 gt 增加了采样得到的gt
                 total_valid_sampled_dict.extend(valid_sampled_dict)
+
 
         sampled_gt_boxes = existed_boxes[gt_boxes_valid.shape[0]:, :] # 将补充插入的gt选出来
 
@@ -514,6 +518,8 @@ class DataBaseSampler(object):
             data_dict = self.add_sampled_boxes_to_scene(
                 data_dict, sampled_gt_boxes, total_valid_sampled_dict, sampled_mv_height, sampled_gt_boxes2d
             )
+            if return_sampled_boxes:
+                data_dict['sampled_gt_boxes'] = sampled_gt_boxes # (extra_num, 7)
 
         # data_dict.pop('gt_boxes_mask')
         return data_dict

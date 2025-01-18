@@ -52,16 +52,18 @@ class DataAugmentor(object):
         if data_dict is None:
             return partial(self.random_world_flip, config=config)
 
-        gt_boxes, gt_mask, points = data_dict['object_bbx_center'], \
+        gt_boxes, gt_mask, points, flip = data_dict['object_bbx_center'], \
                                     data_dict['object_bbx_mask'], \
-                                    data_dict['lidar_np']
+                                    data_dict['lidar_np'], \
+                                    data_dict['flip']
+
         gt_boxes_valid = gt_boxes[gt_mask == 1]
 
-        for cur_axis in config['ALONG_AXIS_LIST']:
+        for i, cur_axis in enumerate(config['ALONG_AXIS_LIST']):
             assert cur_axis in ['x', 'y']
             gt_boxes_valid, points = getattr(augment_utils,
                                              'random_flip_along_%s' % cur_axis)(
-                gt_boxes_valid, points,
+                gt_boxes_valid, points, flip[i] if flip is not None else flip
             )
 
         gt_boxes[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
@@ -80,12 +82,14 @@ class DataAugmentor(object):
         if not isinstance(rot_range, list):
             rot_range = [-rot_range, rot_range]
 
-        gt_boxes, gt_mask, points = data_dict['object_bbx_center'], \
+        gt_boxes, gt_mask, points, noise_rotation = data_dict['object_bbx_center'], \
                                     data_dict['object_bbx_mask'], \
-                                    data_dict['lidar_np']
+                                    data_dict['lidar_np'], \
+                                    data_dict['noise_rotation']
+
         gt_boxes_valid = gt_boxes[gt_mask == 1]
         gt_boxes_valid, points = augment_utils.global_rotation(
-            gt_boxes_valid, points, rot_range=rot_range
+            gt_boxes_valid, points, rot_range, noise_rotation
         )
         gt_boxes[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
 
@@ -99,13 +103,16 @@ class DataAugmentor(object):
         if data_dict is None:
             return partial(self.random_world_scaling, config=config)
 
-        gt_boxes, gt_mask, points = data_dict['object_bbx_center'], \
+        gt_boxes, gt_mask, points, noise_scale = data_dict['object_bbx_center'], \
                                     data_dict['object_bbx_mask'], \
-                                    data_dict['lidar_np']
+                                    data_dict['lidar_np'], \
+                                    data_dict['noise_scale']
+
         gt_boxes_valid = gt_boxes[gt_mask == 1]
 
         gt_boxes_valid, points = augment_utils.global_scaling(
-            gt_boxes_valid, points, config['WORLD_SCALE_RANGE']
+            gt_boxes_valid, points, config['WORLD_SCALE_RANGE'],
+            noise_scale
         )
         gt_boxes[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
 

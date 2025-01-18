@@ -9,6 +9,7 @@ from opencood.models.sub_modules.mean_vfe import MeanVFE
 from opencood.models.sub_modules.sparse_backbone_3d import VoxelBackBone8x
 from opencood.models.sub_modules.height_compression import HeightCompression
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
+from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbone
 from opencood.models.comm_modules.ConQueR_head import ConQueRHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
@@ -24,8 +25,15 @@ class ConQueRSecond(nn.Module):
                                            4, args['grid_size']) # grid 是 2160， 800， 50
         # height compression
         self.height_compression = HeightCompression(args['map_to_bev'])
+
         # base ben backbone
-        self.backbone_2d = BaseBEVBackbone(args['backbone_2d'], 256)
+        is_resnet = args['backbone_2d'].get("resnet", False)
+        if is_resnet:
+            print("===use resbackbone===")
+            self.backbone_2d = ResNetBEVBackbone(args['backbone_2d'], 256) # or you can use ResNetBEVBackbone, which is stronger
+        else:
+            print("===use basebackbone===")
+            self.backbone_2d = BaseBEVBackbone(args['backbone_2d'], 256) # or you can use ResNetBEVBackbone, which is stronger
 
         self.train_flag = args.get("train_flag", True)
         

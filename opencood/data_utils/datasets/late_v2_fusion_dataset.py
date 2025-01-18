@@ -584,7 +584,17 @@ def getLatev2FusionDataset(cls):
             pred_box_tensor = output_dict_ego["ego"]['pred_boxes']
             pred_score = output_dict_ego["ego"]['pred_scores']
             from opencood.utils import box_utils
+            # 过滤
             pred_box_tensor = box_utils.boxes_to_corners_3d(pred_box_tensor, order='lwh')
+
+            # keep_index_1 = box_utils.remove_large_pred_bbx(pred_box_tensor)
+            keep_index_2 = box_utils.remove_bbx_abnormal_z(pred_box_tensor, zmin=-3.5, zmax=1.5)
+            keep_index_1 = keep_index_2 # 较大的bbx 先不移除
+            keep_index = torch.logical_and(keep_index_1, keep_index_2)
+
+            pred_box_tensor = pred_box_tensor[keep_index]
+            pred_score = pred_score[keep_index]
+
             keep_index = box_utils.nms_rotated(pred_box_tensor,
                                             pred_score,
                                             0.15
@@ -594,6 +604,18 @@ def getLatev2FusionDataset(cls):
 
             # select cooresponding score
             pred_score = pred_score[keep_index]
+
+            # filter out the prediction out of the range. with z-dim
+            pred_box3d_np = pred_box_tensor.cpu().numpy()
+            pred_box3d_np, mask = box_utils.mask_boxes_outside_range_numpy(pred_box3d_np,
+                                                        self.point_cloud_range,
+                                                        order='lwh',
+                                                        return_mask=True)
+            pred_box_tensor = torch.from_numpy(pred_box3d_np).to(device=pred_box_tensor.device)
+            pred_score = pred_score[mask]
+
+            assert pred_score.shape[0] == pred_box_tensor.shape[0]
+
             return pred_box_tensor, pred_score, gt_box_tensor
 
         def post_process_no_fusion_uncertainty(self, data_dict, output_dict_ego):

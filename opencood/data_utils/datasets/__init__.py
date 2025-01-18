@@ -3,6 +3,7 @@ from opencood.data_utils.datasets.late_v2_fusion_dataset import getLatev2FusionD
 from opencood.data_utils.datasets.early_fusion_dataset import getEarlyFusionDataset
 from opencood.data_utils.datasets.intermediate_fusion_dataset import getIntermediateFusionDataset
 from opencood.data_utils.datasets.intermediate_v2_fusion_dataset import getIntermediatev2FusionDataset
+from opencood.data_utils.datasets.intermediate_v2_fusion_dataset_w_augment import getIntermediatev2augFusionDataset
 from opencood.data_utils.datasets.intermediate_2stage_fusion_dataset import getIntermediate2stageFusionDataset
 from opencood.data_utils.datasets.basedataset.opv2v_basedataset import OPV2VBaseDataset
 from opencood.data_utils.datasets.basedataset.v2xsim_basedataset import V2XSIMBaseDataset
@@ -13,7 +14,7 @@ def build_dataset(dataset_cfg, visualize=False, train=True):
     fusion_name = dataset_cfg['fusion']['core_method']
     dataset_name = dataset_cfg['fusion']['dataset']
 
-    assert fusion_name in ['late', 'latev2', 'intermediate', 'intermediatev2', 'intermediate2stage', 'early']
+    assert fusion_name in ['late', 'latev2', 'intermediate', 'intermediatev2', 'intermediatev2aug', 'intermediate2stage', 'early']
     assert dataset_name in ['opv2v', 'v2xsim', 'dairv2x', 'v2xset']
 
     fusion_dataset_func = "get" + fusion_name.capitalize() + "FusionDataset"

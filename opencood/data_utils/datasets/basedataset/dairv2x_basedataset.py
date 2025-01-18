@@ -246,7 +246,8 @@ class DAIRV2XBaseDataset(Dataset):
         )
         return camera_to_lidar, camera_intrinsic
 
-    def augment(self, lidar_np, object_bbx_center, object_bbx_mask, random_seed=None, choice=None):
+    def augment(self, lidar_np, object_bbx_center, object_bbx_mask, random_seed=None, choice=None, stay_static=False, return_sampled_boxes= False,
+                flip=None, rotation=None, scale=None):
         """
         Given the raw point cloud, augment by flipping and rotation.
         Parameters
@@ -260,7 +261,12 @@ class DAIRV2XBaseDataset(Dataset):
         """
         tmp_dict = {'lidar_np': lidar_np,
                     'object_bbx_center': object_bbx_center,
-                    'object_bbx_mask': object_bbx_mask}
+                    'object_bbx_mask': object_bbx_mask,
+                    'stay_static': stay_static,
+                    'return_sampled_boxes': return_sampled_boxes,
+                    'flip': flip,
+                    'noise_rotation': rotation,
+                    'noise_scale': scale}
         if random_seed:
             self.data_augmentor.random_seed = random_seed
         if choice:
@@ -271,6 +277,9 @@ class DAIRV2XBaseDataset(Dataset):
         lidar_np = tmp_dict['lidar_np']
         object_bbx_center = tmp_dict['object_bbx_center']
         object_bbx_mask = tmp_dict['object_bbx_mask']
+
+        if return_sampled_boxes:
+            return lidar_np, object_bbx_center, object_bbx_mask, tmp_dict['sampled_gt_boxes']
 
         return lidar_np, object_bbx_center, object_bbx_mask
     

@@ -494,7 +494,7 @@ class ConQueRHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.25, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.15, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
@@ -695,6 +695,151 @@ class ConQueRHead(nn.Module):
         return [{"pred_logits": a, "pred_boxes": b} for a, b in
                 zip(outputs_class, outputs_coord)]
 
+# vfl loss
+class VariFocalLoss(nn.Module):
+    def __init__(self, focal_alpha):
+        super().__init__()
+        self.focal_alpha = focal_alpha
+        self.target_classes = None
+        self.src_logits = None
+        self.alpha = 0.25
+        self.gamma = 2.0
+
+    def forward(self, outputs, targets, indices, num_boxes):
+        outputs["matched_indices"] = indices
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"] # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        target_classes_onehot = torch.zeros_like(src_logits) # (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        
+        idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
+
+        target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
+
+        target_score_o = torch.zeros(target_classes_onehot.size(0), target_classes_onehot.size(1), dtype=src_logits.dtype, device=src_logits.device)
+
+        # for metrics calculation
+        self.target_classes = target_classes_o
+
+        if "topk_indexes" in outputs.keys(): # 这是dqs做损失要的，dqs也和最佳匹配的做损失，要求最佳匹配的query的置信度接近1
+            topk_indexes = outputs["topk_indexes"] # (B, 1000, 1) dqs结果索引
+            self.src_logits = torch.gather(src_logits, 1, topk_indexes.expand(-1, -1, src_logits.shape[-1]))[idx] # (B, 1000, 1)
+            target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
+
+            src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+            # print('sum target is ', target_classes_onehot.sum())
+        else:
+            self.src_logits = src_logits[idx]
+            # 0 for bg, 1 for fg
+            # N, L, C
+            target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
+            src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+
+        
+        target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
+
+        pred_score = F.sigmoid(src_logits).detach() # （B, HW, 1） det损失时为 (B, 1000, 1)
+        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_score
+
+        loss_ce = (
+                 F.binary_cross_entropy_with_logits(
+                    src_logits, # 预测，dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+                    target_score, # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 匹配上的query
+                    weight=weight,
+                    reduction="sum"
+                )
+                / num_boxes
+        ) # focal loss 取mean结果
+
+        losses = {
+            "loss_ce": loss_ce,
+        }
+
+        return losses
+
+# mal loss
+class MatchabilityAwareLoss(nn.Module):
+    def __init__(self, focal_alpha):
+        super().__init__()
+        self.focal_alpha = focal_alpha
+        self.target_classes = None
+        self.src_logits = None
+        self.mal_alpha = None
+        self.gamma = 1.5
+
+    def forward(self, outputs, targets, indices, num_boxes):
+        outputs["matched_indices"] = indices
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"] # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        target_classes_onehot = torch.zeros_like(src_logits) # (B, H*W, 1) det损失时为 (B, 1000, 1) 
+        
+        idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
+
+        target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
+
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
+        # print("indices is ", indices)
+        # print("t['labels'] is ", targets[0]['labels'])
+        # print("target_classes_o is ", target_classes_o)
+
+        # for metrics calculation
+        self.target_classes = target_classes_o
+
+        target_score_o = torch.zeros(target_classes_onehot.size(0), target_classes_onehot.size(1), dtype=src_logits.dtype, device=src_logits.device) # (B, H*W) det损失时为 (B, 1000) 
+
+        if "topk_indexes" in outputs.keys(): # 这是dqs做损失要的，dqs也和最佳匹配的做损失，要求最佳匹配的query的置信度接近1
+            topk_indexes = outputs["topk_indexes"] # (B, 1000, 1) dqs结果索引
+            self.src_logits = torch.gather(src_logits, 1, topk_indexes.expand(-1, -1, src_logits.shape[-1]))[idx] # (B, 1000, 1)
+            target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
+
+            src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx[0], topk_indexes[idx].squeeze(-1)] = ious.to(target_score_o.dtype) # (B, HW)
+            # print('sum target is ', target_classes_onehot.sum())
+            # print('ious shape is ', ious.shape)
+        else:
+            self.src_logits = src_logits[idx]
+            # 0 for bg, 1 for fg
+            # N, L, C
+            target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
+            src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
+            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+
+
+        target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
+
+        pred_score = F.sigmoid(src_logits).detach() # （B, HW, 1） det损失时为 (B, 1000, 1)
+        target_score = target_score.pow(self.gamma) # NOTE paper上的公式应该是有笔误 
+        if self.mal_alpha != None:
+            weight = self.mal_alpha * pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_classes_onehot
+        else:
+            weight = pred_score.pow(self.gamma) * (1 - target_classes_onehot) + target_classes_onehot
+
+        loss_ce = (
+                 F.binary_cross_entropy_with_logits(
+                    src_logits, # 预测，dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 
+                    target_score, # dqs损失时是 (B, H*W, 1) det损失时为 (B, 1000, 1) 匹配上的query
+                    weight=weight,
+                    reduction="sum"
+                )
+                / num_boxes
+        ) # mal loss 取mean结果
+
+        losses = {
+            "loss_ce": loss_ce,
+        }
+
+        return losses
 
 class ClassificationLoss(nn.Module):
     def __init__(self, focal_alpha):
@@ -847,7 +992,7 @@ class Det3DLoss(nn.Module):
             if loss == "boxes":
                 self.det3d_losses[loss] = RegressionLoss(decode_func=decode_func)
             elif loss == "focal_labels":
-                self.det3d_losses[loss] = ClassificationLoss(0.25) # alpha=0.25
+                self.det3d_losses[loss] = MatchabilityAwareLoss(0.25) # alpha=0.25
             else:
                 raise ValueError(f"Only boxes|focal_labels are supported for det3d losses. Found {loss}")
 

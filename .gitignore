@@ -141,3 +141,8 @@ opencood/logs
 ./vscode
 feature_visualizations
 feature_visualizations_discrete
+feature_vis_heatmap
+feature_vis_res_300query
+feature_vis_res_1000query
+feature_visualizations_conquer
+feature_visualizations_conquer_pp
