@@ -743,10 +743,7 @@ class ClassificationLoss(nn.Module):
     ):
         # 输入的两项形状都为 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 预测结果 & one-hot编码
         p = torch.sigmoid(logits)
-        # print("p.shape is ", p.shape)
-        # print("targets.shape is ", targets.shape)
-        # print("targets is ", targets)
-        # xxx
+
         ce_loss = F.binary_cross_entropy(p, targets, reduction="none") # 二元交叉熵 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 
         p_t = p * targets + (1 - p) * (1 - targets)
         loss = ce_loss * ((1 - p_t) ** gamma) # 包含调节因子，初步形成focal loss

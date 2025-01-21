@@ -396,7 +396,7 @@ class CQCPInstanceHead(nn.Module):
             targets = None
         # print("input_query_bbox shape is", input_query_bbox.shape)
         # print("input_query_label shape is", input_query_label.shape)
-        outputs, all_queries, ref_bboxes = self.transformer(
+        outputs, all_queries, ref_bboxes, solo_bboxes = self.transformer(
             features, # [(B, 256, H, W)]
             pos_encodings, # [(B, 256, H, W)]
             input_query_bbox, # (B, pad_size, 7)
@@ -417,7 +417,8 @@ class CQCPInstanceHead(nn.Module):
         src_ref_windows: (B_n, H * W, 7) 参考框，类似于锚框
         src_indexes: (B_n, query_num, 1) ego个fined dqs query 索引 其中all_query_num == query_num + extra_num 这个用于监督encoder的单车输出
         2️⃣ all_queries: [(n1_all, 256), (n2_all, 256)...]
-        2️⃣ ref_bboxes: [(n1_all, 7), (n2_all, 7)...]
+        3️⃣ ref_bboxes: [(n1_all, 7), (n2_all, 7)...]
+        4️⃣ solo_bboxes: [(n1_all, 8), (n2_all, 8)...] len = 6
         
         '''
 
@@ -482,7 +483,18 @@ class CQCPInstanceHead(nn.Module):
         fused_boxes_lst = []
         # print("len(all_queries) ", len(all_queries))
         for b_id in range(len(all_queries)):
-            fused_class, fused_coords = self.fused_detection_head(all_queries[b_id].unsqueeze(0), ref_bboxes[b_id].unsqueeze(0)) # (1, n, 7), (1, n, 1)
+            if all_queries[b_id] is not None:
+                fused_class, fused_coords = self.fused_detection_head(all_queries[b_id].unsqueeze(0), ref_bboxes[b_id].unsqueeze(0)) # (1, n, 7), (1, n, 1)
+            
+                if solo_bboxes[b_id] is not None:
+                    solo_logits = inverse_sigmoid(solo_bboxes[b_id][..., 7:]) # (1, solo_num, 1)
+                    fused_class = torch.cat([fused_class, solo_logits], dim=1)
+                    fused_coords = torch.cat([fused_coords, solo_bboxes[b_id][..., :7]], dim=1)
+            else:
+                if solo_bboxes[b_id] is None: # 如果需要融合的query是空的，同时也没有独立的query, 那直接g了
+                    raise ValueError("Fuck!!! kaobei!!!")
+                fused_class = inverse_sigmoid(solo_bboxes[b_id][..., 7:])
+                fused_coords = solo_bboxes[b_id][..., :7]
             fused_logits_lst.append(fused_class)
             fused_boxes_lst.append(fused_coords)
 
@@ -820,7 +832,6 @@ class CQCPInstanceHead(nn.Module):
             v_mean = v / bs
             loss_all += v_mean
             loss_dict.update({k + '_fused': v.item()})
-
         # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
         # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d_single.to(torch.float32), gt_bboxes_3d_mask_single, None) # 前景预测损失
         # loss_all += loss_score
@@ -1005,7 +1016,7 @@ class VariFocalLoss(nn.Module):
         self.focal_alpha = focal_alpha
         self.target_classes = None
         self.src_logits = None
-        self.alpha = 0.25
+        self.alpha = 0.75
         self.gamma = 2.0
         self.decode_func = decode_func
 

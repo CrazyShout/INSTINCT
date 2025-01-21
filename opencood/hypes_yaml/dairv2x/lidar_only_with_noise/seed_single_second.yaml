@@ -1,4 +1,4 @@
-name: dairv2x_seed_lidar_late_fusion_second
+name: dairv2x_seed_lidar_late_fusion_second_onecycle
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -8,7 +8,7 @@ class_names: ['Car']
 
 yaml_parser: "load_second_params"
 train_params:
-  batch_size: &batch_size 8
+  batch_size: &batch_size 6
   epoches: 60
   eval_freq: 1
   save_freq: 1
@@ -124,7 +124,9 @@ model:
         num_filters: [ 128, 256 ]
         upsample_strides: [ 1, 2 ]
         num_upsample_filter: [ 256, 256 ]
-
+        
+        resnet: True
+        inplanes: 256
     dense_head:
         name: SEEDHead
 
@@ -159,7 +161,7 @@ model:
 
         target_assigner_config:
             hungarian_assigner:
-                cls_cost: 1.0
+                cls_cost: 2.0
                 bbox_cost: 4.0
                 iou_cost: 2.0
                 rad_cost: 4.0
@@ -187,34 +189,27 @@ model:
       dim: [ 256 ]
       input_dim: 384 # 128 * 3
 
-loss:
-  core_method: point_pillar_loss
-  args:
-    pos_cls_weight: 1.0
-    cls:
-      type: 'SigmoidFocalLoss'
-      alpha: 0.25
-      gamma: 2.0
-      weight: 1.0
-    reg:
-      type: 'WeightedSmoothL1Loss'
-      sigma: 3.0
-      codewise: true
-      weight: 2.0
-    dir:
-      type: 'WeightedSoftmaxClassificationLoss'
-      weight: 0.2
-      args: *dir_args
+# optimizer:
+#   core_method: AdamW
+#   lr: 1e-4
+#   args:
+#     eps: 1e-10
+#     weight_decay: 1e-2
+
+# lr_scheduler:
+#   core_method: Exponential #step, multistep and Exponential support
+#   gamma: 0.9
+#   step_size: [10, 15]
 
 optimizer:
-  core_method: AdamW
-  lr: 1e-4
+  core_method: adam_onecycle
   args:
-    eps: 1e-10
     weight_decay: 1e-2
 
 lr_scheduler:
-  core_method: Exponential #step, multistep and Exponential support
-  gamma: 0.9
-  step_size: [10, 15]
+  core_method: onecycle #step, multistep and Exponential support
+  max_lr: 1e-3
+  moms: [0.95, 0.85]
+  div_factor: 10
+  pct_start: 0.4
 

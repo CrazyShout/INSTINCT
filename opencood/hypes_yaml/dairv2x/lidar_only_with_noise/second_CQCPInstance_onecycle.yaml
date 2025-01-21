@@ -1,4 +1,4 @@
-name: dairv2x_CQCPInstance_lidar_intermediate_fusion_secondres_onecycle_gaussianmask_freeze_clscost2.0
+name: dairv2x_CQCPInstance_lidar_intermediate_fusion_secondres_onecycle_gaussianmask_freeze_clscost2.0_soloboxes
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -8,7 +8,7 @@ class_names: ['Car']
 
 yaml_parser: "load_second_params"
 train_params:
-  batch_size: &batch_size 6
+  batch_size: &batch_size 18
   epoches: 60
   eval_freq: 1
   save_freq: 1

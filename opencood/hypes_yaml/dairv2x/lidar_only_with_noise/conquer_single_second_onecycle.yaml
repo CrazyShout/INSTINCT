@@ -1,4 +1,4 @@
-name: dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_malcost2.0
+name: dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_vflcost2.0
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"

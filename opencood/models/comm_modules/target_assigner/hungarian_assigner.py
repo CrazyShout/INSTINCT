@@ -67,14 +67,13 @@ def generalized_box3d_iou(boxes1, boxes2):
 
 
 class HungarianMatcher3d(nn.Module):
-    def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, cost_rad: float = 1, decode_func=None):
+    def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, cost_rad: float = 1):
         super().__init__()
         self.cost_class = cost_class                # 1.0
         self.cost_bbox = cost_bbox                  # 4.0
         self.cost_giou = cost_giou                  # 2.0
         self.cost_rad = cost_rad                    # 4.0
 
-        self.decode_fuc = decode_func
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0 or cost_rad != 0, "all costs cant be 0"
 
     @torch.no_grad()
