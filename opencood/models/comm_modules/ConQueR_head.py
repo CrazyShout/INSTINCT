@@ -231,7 +231,6 @@ class ConQueRHead(nn.Module):
             cost_bbox=self.model_cfg['target_assigner_config']['hungarian_assigner']['bbox_cost'],   # 4.0
             cost_giou=self.model_cfg['target_assigner_config']['hungarian_assigner']['iou_cost'],    # 2.0
             cost_rad=self.model_cfg['target_assigner_config']['hungarian_assigner']['rad_cost'],     # 4.0
-            decode_func=self.decode_bbox
         )
 
         weight_dict = {
