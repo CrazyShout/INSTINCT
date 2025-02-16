@@ -50,6 +50,7 @@ class Transformer(nn.Module):
         decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers)
         self.sample_idx = 0
+        self.iou_rectifier = 0.68
     def _create_ref_windows(self, tensor_list):
         device = tensor_list[0].device
 
@@ -75,6 +76,38 @@ class Transformer(nn.Module):
         ref_windows = torch.cat(ref_windows, dim=1)
 
         return ref_windows
+
+    # def _get_enc_proposals(self, enc_embed, ref_windows, indexes=None):
+    #     B, L = enc_embed.shape[:2]
+    #     out_logits, out_ref_windows, out_ious = self.proposal_head(enc_embed, ref_windows) # 分类logits(B, H * W, 1)  、boxes 定位 (B, H * W, 7) 、 IoU预测 (B, H * W, 1)
+
+    #     out_probs = out_logits[..., 0].sigmoid() # (B, HW)
+
+    #     mask = (out_probs > 0.2).int() # (B, H * W, )  大于阈值的全部置为True
+
+    #     out_ious = (out_ious + 1) / 2
+    #     if isinstance(self.iou_rectifier, float): # 大于阈值的部分需要同时考虑IoU得分
+    #         temp_probs = torch.pow(out_probs, 1 - self.iou_rectifier) * torch.pow(out_ious[..., 0], self.iou_rectifier)
+    #         out_probs = out_probs * (1 - mask) + mask * temp_probs
+    #     else:
+    #         raise TypeError('only list or float')
+
+    #     topk_probs, indexes = torch.topk(out_probs, self.num_queries, dim=1, sorted=False)
+    #     topk_probs = topk_probs.unsqueeze(-1)
+    #     indexes = indexes.unsqueeze(-1)
+
+    #     out_ref_windows = torch.gather(out_ref_windows, 1, indexes.expand(-1, -1, out_ref_windows.shape[-1]))
+    #     out_ref_windows = torch.cat(
+    #         (
+    #             out_ref_windows.detach(),
+    #             topk_probs.detach().expand(-1, -1, out_logits.shape[-1]),
+    #         ),
+    #         dim=-1,
+    #     )
+    #     out_pos = None
+    #     out_embed = None
+
+    #     return out_embed, out_pos, out_ref_windows, indexes
 
     def _get_enc_proposals(self, enc_embed, ref_windows, indexes=None):
         B, L = enc_embed.shape[:2]
@@ -403,6 +436,7 @@ class TransformerDecoder(nn.Module):
         for idx, layer in enumerate(self.layers):
             output = layer(idx, output, query_pos, memory, memory_shape, memory_start_idx, ref_windows, attn_mask)
             new_ref_logits, new_ref_windows = self.detection_head(output, ref_windows[..., :7], idx)
+            # new_ref_logits, new_ref_windows, new_ref_ious = self.detection_head(output, ref_windows[..., :7], idx)
             new_ref_probs = new_ref_logits.sigmoid()
             ref_windows = torch.cat(
                 (

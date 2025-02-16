@@ -11,6 +11,7 @@ from opencood.models.sub_modules.height_compression import HeightCompression
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
 from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbone
 from opencood.models.comm_modules.ConQueR_head import ConQueRHead
+# from opencood.models.comm_modules.ConQueR_QS_head import ConQueRHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
 

@@ -182,7 +182,6 @@ class HungarianMatcher3d(nn.Module):
             # print("C_i shape is ", C_i.shape)
             # print("indice  is ", indice)
             # xxx
-
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices] # 索引数组变张量 由于gt数量远小于object query数量
 
     def extra_repr(self):

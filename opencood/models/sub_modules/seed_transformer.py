@@ -183,6 +183,7 @@ class SEEDTransformer(nn.Module):
             out_probs = out_probs * (1 - mask) + mask * temp_probs # 这里对应的论文中的公式3
 
         elif isinstance(self.iou_rectifier, float): # 类别无关会执行以下分支
+            out_ious = (out_ious + 1) / 2 # iou得分缩放到0-1
             temp_probs = torch.pow(out_probs, 1 - self.iou_rectifier) * torch.pow(out_ious[..., 0], self.iou_rectifier)
             out_probs = out_probs * (1 - mask) + mask * temp_probs # (B, H * W, ) 
         else:

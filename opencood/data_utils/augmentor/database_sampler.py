@@ -510,7 +510,9 @@ class DataBaseSampler(object):
 
 
         sampled_gt_boxes = existed_boxes[gt_boxes_valid.shape[0]:, :] # 将补充插入的gt选出来
-
+        
+        if return_sampled_boxes:
+            data_dict['sampled_gt_boxes'] = np.empty((0,7))
         if total_valid_sampled_dict.__len__() > 0: # 存在要插入的gt
             sampled_gt_boxes2d = np.concatenate(sampled_gt_boxes2d, axis=0) if len(sampled_gt_boxes2d) > 0 else None
             sampled_mv_height = np.concatenate(sampled_mv_height, axis=0) if len(sampled_mv_height) > 0 else None

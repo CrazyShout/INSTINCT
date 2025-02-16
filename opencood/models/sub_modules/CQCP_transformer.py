@@ -2167,7 +2167,6 @@ class TransformerInstanceV1(nn.Module):
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
-
         decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
         self.fd_atten = Fusion_Decoder(d_model)
@@ -2233,6 +2232,7 @@ class TransformerInstanceV1(nn.Module):
         out_embed = None
 
         return out_embed, out_pos, out_ref_windows, indexes
+
 
     @torch.no_grad()
     def _momentum_update_gt_decoder(self):
@@ -2415,6 +2415,7 @@ class TransformerInstanceV1(nn.Module):
 
         all_queries = []
         ref_bboxes = []
+        solo_bboxes = []
         for bid in range(len(record_len)):
             N = record_len[bid] # number of valid agent
             t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
@@ -2426,7 +2427,6 @@ class TransformerInstanceV1(nn.Module):
             neighbor_memory = warp_affine_simple(memory_discrete_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, C, H, W)
             neighbor_memory_mask = warp_affine_simple(memory_mask_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 1, H, W)
             neighbor_select_bbox_b = warp_affine_simple(select_bbox_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 8, H，W) 
-
             
             neighbor_memory = neighbor_memory.flatten(2).permute(0, 2, 1) # (N, HW, C)
             neighbor_memory_mask = neighbor_memory_mask.flatten(2).permute(0, 2, 1) # (N, HW, 1) 这个里面有0有1, 1的地方就是对应其有效的query
@@ -2434,19 +2434,22 @@ class TransformerInstanceV1(nn.Module):
 
             neighbor_mask = neighbor_memory_mask.squeeze(-1).bool() # (N, HW)
             valid_query_lst = [neighbor_memory[i][neighbor_mask[i]] for i in range(N)] # [(n1, C), (n2, C)...]
-            valid_bbox_lst = [neighbor_select_bbox_b[i][neighbor_mask[i]] for i in range(N)] # [(n1, 8), (n2, 8)...] 
+            valid_bbox_lst = [neighbor_select_bbox_b[i][neighbor_mask[i]] for i in range(N)] # [(n1, 8), (n2, 8)...]
+            # valid_query_lst = valid_query_lst[1:]
+            # valid_bbox_lst = valid_bbox_lst[1:]
             valid_bbox_norm_lst = [] # [(n1, 8), (n2, 8)...] 
 
             for id in range(len(valid_bbox_lst)):
-                valid_box = valid_bbox_lst[id]
+                valid_box = valid_bbox_lst[id] # (n, 8)
                 valid_box_center = self.box_decode_func(valid_box[..., :7]) # (n, 7) 反归一化 变到点云坐标系中的坐标
                 valid_box_corner = box_utils.boxes_to_corners_3d(valid_box_center, 'lwh') # (n, 8, 3)
-                projected_bbox_corner = box_utils.project_box3d(valid_box_corner.float(), t_matrix_ref[0, id].float())
+                projected_bbox_corner = box_utils.project_box3d(valid_box_corner.float(), t_matrix_ref[id, 0].float())
                 projected_bbox_center = box_utils.corners_to_boxes_3d(projected_bbox_corner, 'lwh') # (n, 7)
                 projected_bbox_center_norm = self.box_encode_func(projected_bbox_center) # 重新归一化
 
                 # projected_bbox_center = torch.cat([projected_bbox_center, valid_box[:, 7:]], dim=-1) # # (n, 8)
                 projected_bbox_center_norm = torch.cat([projected_bbox_center_norm, valid_box[:, 7:]], dim=-1) # # (n, 8)
+                # projected_bbox_center_norm = valid_box 
 
                 # valid_bbox_lst[id] = projected_bbox_center # 到这里后所有的box都统一到ego坐标系了 且所有的box都是真实坐标系，非归一化数值
                 valid_bbox_norm_lst.append(projected_bbox_center_norm)
@@ -2460,6 +2463,9 @@ class TransformerInstanceV1(nn.Module):
             i_indices = i_indices.expand(N, -1)  # (N, HW)
             j_indices = j_indices.expand(N, -1)  # (N, HW)
 
+            # 提取有效位置的索引
+            # valid_i = i_indices[neighbor_mask == 1]  
+            # valid_j = j_indices[neighbor_mask == 1]  # 所有有效位置的 j 坐标
 
             query_info_lst = []
             for i in range(len(valid_query_lst)): # 遍历每个agent
@@ -2473,7 +2479,9 @@ class TransformerInstanceV1(nn.Module):
                 valid_i = i_indices[i][valid_mask == 1] # 所有有效位置的 i 坐标 (n, )
                 valid_j = j_indices[i][valid_mask == 1] # 所有有效位置的 j 坐标
                 valid_2d_pos = torch.stack([valid_i, valid_j], dim=-1) # (n, 2)
-
+                # print("torch.sum(valid_mask) is ", torch.sum(valid_mask))
+                # print("valid_mask is ", valid_mask)
+                # print("valid_2d_pos is ", valid_2d_pos)
                 for j in range(n_q): # 遍历每个query
                     query_info = {
                         "agent_id": i,
@@ -2487,40 +2495,75 @@ class TransformerInstanceV1(nn.Module):
                         "feature": agent_queries[j]
                     }
                     query_info_lst.append(query_info)
-            attn_mask, valid_indicies = gaussian_atten_mask_from_bboxes(query_info_lst) # (M, M)的Mask
-            valid_feat = []
-            valid_feat_pos = []
-            norm_bboxes = []
-            for vid in valid_indicies:
-                per_query_feat = query_info_lst[vid]['feature'] + query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
-                # per_query_feat_w_pos = query_info_lst[vid]['feature'] + query_info_lst[vid]['pos_emb'] + self.agent_embed(query_info_lst[vid]['agent_id'])
-                per_query_pos = query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
-                per_query_box = query_info_lst[vid]['box_norm']
+            # 🌟 我们的主张是 将所有的query对应的box放在一起，判断两两iou，如果有某个和其他所有box的重合度都为0.1或者以下，认为它是独立检测，则这个不需要交互，直接参与最后的匹配
+            attn_mask, valid_indicies, indep_queries = gaussian_atten_mask_from_bboxes(query_info_lst, decode_box_func=self.box_decode_func) # (M, M)的Mask
+            # attn_mask = None
+            if attn_mask is not None:
+                valid_feat = []
+                valid_feat_pos = []
+                norm_bboxes = []
+                for vid in valid_indicies:
+                    per_query_feat = query_info_lst[vid]['feature']
+                    # per_query_feat_w_pos = query_info_lst[vid]['feature'] + query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
+                    per_query_pos = query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
+                    per_query_box = query_info_lst[vid]['box_norm']
 
-                valid_feat.append(per_query_feat.unsqueeze(0)) # (1, D)
-                valid_feat_pos.append(per_query_pos.unsqueeze(0)) # (1, D)
-                norm_bboxes.append(per_query_box.unsqueeze(0)) # (1, 7)
-            valid_feat = torch.cat(valid_feat, dim=0).unsqueeze(0) # (1, M, D)
-            valid_feat_pos = torch.cat(valid_feat_pos, dim=0).unsqueeze(0) # (1, M, D)
-            norm_bboxes = torch.cat(norm_bboxes, dim=0) # (M, 7)
+                    valid_feat.append(per_query_feat.unsqueeze(0)) # (1, D)
+                    valid_feat_pos.append(per_query_pos.unsqueeze(0)) # (1, D)
+                    norm_bboxes.append(per_query_box.unsqueeze(0)) # (1, 7)
+                valid_feat = torch.cat(valid_feat, dim=0).unsqueeze(0) # (1, M, D)
+                valid_feat_pos = torch.cat(valid_feat_pos, dim=0).unsqueeze(0) # (1, M, D)
+                norm_bboxes = torch.cat(norm_bboxes, dim=0) # (M, 7)
 
-            fused_query = self.fd_atten(valid_feat, valid_feat_pos, attn_mask)
+                fused_query = self.fd_atten(valid_feat, valid_feat_pos, attn_mask)
 
-            queries = fused_query.squeeze(0) # n_all, 256
+                queries = fused_query.squeeze(0) # n_all, 256
 
-            ref_bbox = norm_bboxes # n_all, 7
+                ref_bbox = norm_bboxes # n_all, 7
+            else:
+                queries = ref_bbox = None
+
+            if len(indep_queries) > 0:
+                indep_boxes = []
+                for indep_query in indep_queries:
+                    indep_box = torch.cat((indep_query['box_norm'], indep_query['confidence']), dim=-1) # (8)
+                    indep_boxes.append(indep_box.unsqueeze(0))
+                indep_boxes = torch.cat(indep_boxes, dim=0) # (indep_num, 8)
+                indep_boxes = indep_boxes.unsqueeze(0) # (1, indep_num, 8)
+            else:
+                indep_boxes = None
+                indep_boxes = torch.zeros(1, 1, 8).to(memory)
 
             all_queries.append(queries)
             ref_bboxes.append(ref_bbox)
+            solo_bboxes.append(indep_boxes)
             
 
-        return result, all_queries, ref_bboxes
+        return result, all_queries, ref_bboxes, solo_bboxes
 
-def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.10):
+def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.10, decode_box_func = None):
 
     # 1) 先过滤置信度
     valid_indices = [i for i, q in enumerate(all_queries) if q['confidence'] >= conf_thresh]
+
+    # TODO 暂时使用更低的置信度来卡
+    if len(valid_indices) == 0:
+        return None, [], []
+    
     valid_queries = [all_queries[i] for i in valid_indices]
+
+    valid_boxes = torch.stack([q['box_norm'] for q in valid_queries]) # (M,7)
+    valid_boxes = decode_box_func(valid_boxes)
+    ious = iou3d_nms_utils.boxes_iou3d_gpu(valid_boxes, valid_boxes)
+    indep_index =  find_isolated_detections(ious, 0.1)
+    # 提取符合条件的查询
+    indep_queries = [valid_queries[i] for i in indep_index.cpu().numpy()]
+    # 更新 valid_queries：去掉符合条件的查询
+    valid_indices = [valid_indices[i] for i in range(len(valid_indices)) if i not in indep_index.cpu().numpy()]
+    valid_queries = [valid_queries[i] for i in range(len(valid_queries)) if i not in indep_index.cpu().numpy()]
+
+    if len(valid_indices) == 0:
+        return None, [], indep_queries
 
     center_xy = torch.stack([q['position'] for q in valid_queries]) # (M,2)
     boxes_lw = torch.stack([q['bbox_size'] for q in valid_queries]) # (M,2)
@@ -2531,43 +2574,29 @@ def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.10):
     gaussian_mask[gaussian_mask < torch.finfo(torch.float32).eps] = 0
     attn_mask = gaussian_mask.log()
 
-    return attn_mask, valid_indices
+    # return attn_mask, valid_indices, []
+    return attn_mask, valid_indices, indep_queries
 
-class GroupAttention(nn.Module):
-    """
-    对一个组内的特征做一次自注意力(Transformer Encoder 的一层简化版本)。
-    """
-    def __init__(self, d_model, nhead=4, dim_feedforward=256, dropout=0.1, activation='gelu'):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.activation = get_activation_fn(activation)
+def find_isolated_detections(IoUs, threshold=0.1):
+    # 获取IoU矩阵的大小
+    M = IoUs.shape[0]
+    
+    # 构造一个掩码，去除对角线上的元素
+    # 对角线元素是IoUs[i, i]，我们需要排除这些值，因为它们总是1（与自己重合）
+    mask = torch.eye(M, device=IoUs.device).bool()
+    
+    # 通过广播比较所有IoU值是否都小于阈值
+    # 选择IoUs中非对角线的元素（mask为False）
+    IoUs_without_diag = IoUs.masked_select(~mask).view(M, M - 1)
+    
+    # 查找与其他所有框的IoU都小于阈值的索引
+    isolated_mask = (IoUs_without_diag < threshold).all(dim=1)  # 对每行进行逻辑“与”操作 (M, M-1) --> (M, )
+    
+    # 返回符合条件的索引
+    isolated_indices = isolated_mask.nonzero(as_tuple=True)[0]
+    
+    return isolated_indices
 
-    def forward(self, x):
-        """
-        x: (B, K, D)
-           B: batch_size (可理解为一次处理多个 group 的并行，如果做不到就单组单组算)
-           K: 一个组内 Query 数量
-           D: 特征维度
-        """
-        # Self-Attention
-        # Q, K, V 全都是 x
-        attn_out, _ = self.self_attn(query=x, key=x, value=x)
-        x = x + self.dropout1(attn_out)
-        x = self.norm1(x)
-
-        # Feed Forward
-        ff_out = self.linear2(self.dropout(self.activation(self.linear1(x))))
-        x = x + self.dropout2(ff_out)
-        x = self.norm2(x)
-
-        return x
 
 class Fusion_Decoder(nn.Module):
     """

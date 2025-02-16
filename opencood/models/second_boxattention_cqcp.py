@@ -13,6 +13,7 @@ from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbo
 from opencood.models.comm_modules.CQCP_head import CQCPHead
 from opencood.models.comm_modules.CQCP_head_feature import CQCPFeatureHead
 from opencood.models.comm_modules.CQCP_head_instance import CQCPInstanceHead
+# from opencood.models.comm_modules.CQCPQS_head_instance import CQCPInstanceHead
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 
 

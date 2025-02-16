@@ -160,7 +160,7 @@ class SpVoxelPreprocessor(BasePreprocessor):
             torch.from_numpy(np.concatenate(batch['voxel_num_points'])) # eg. [[3000], [2000]] -> [5000]
         coords = batch['voxel_coords'] # [[3000, 3], [2000, 3]] 列表长度为协同车的个数
         voxel_coords = []
-
+        # print("len(coords) is ", len(coords))
         for i in range(len(coords)): # 遍历一个batch中的所有的体素坐标
             voxel_coords.append(
                 np.pad(coords[i], ((0, 0), (1, 0)),

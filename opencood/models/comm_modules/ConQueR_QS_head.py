@@ -9,9 +9,9 @@ from torch import nn
 
 from opencood.pcdet_utils.roiaware_pool3d import roiaware_pool3d_utils
 from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
-from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
+from .target_assigner.hungarian_assigner_qs import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
-from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
+from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process_w_ious
 from opencood.models.sub_modules.ConQueR_transformer import Transformer, MLP, get_clones
 
 
@@ -79,22 +79,16 @@ class Det3DHead(nn.Module):
         self.class_embed = get_clones(class_embed, num_layers)
         self.bbox_embed = get_clones(bbox_embed, num_layers)
 
-        # iou_embed = MLP(hidden_dim, hidden_dim, 1, 3) # 每个预测框的IoU估计值
-        # nn.init.constant_(iou_embed.layers[-1].weight.data, 0)
-        # nn.init.constant_(iou_embed.layers[-1].bias.data, 0)
-        # self.iou_embed = get_clones(iou_embed, num_layers)
+        iou_embed = MLP(hidden_dim, hidden_dim, 1, 3) # 每个预测框的IoU估计值
+        nn.init.constant_(iou_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(iou_embed.layers[-1].bias.data, 0)
+        self.iou_embed = get_clones(iou_embed, num_layers)
 
     def forward(self, embed, anchors, layer_idx=0):
-        # print("embed shape is", embed.shape)
-        # print("anchors shape is", anchors.shape)
-        # print("anchors  is", anchors)
-
         cls_logits = self.class_embed[layer_idx](embed)
         box_coords = (self.bbox_embed[layer_idx](embed) + inverse_sigmoid(anchors)).sigmoid() # 这里类似锚框的机制，逆转回实数空间加上预测的偏移，最后重新归一化
-        # print("box_coords is", box_coords)
-
-        # pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
-        return cls_logits, box_coords
+        pred_iou = (self.iou_embed[layer_idx](embed)).clamp(-1, 1)
+        return cls_logits, box_coords, pred_iou
 
 
 class MaskPredictor(nn.Module):
@@ -226,11 +220,14 @@ class ConQueRHead(nn.Module):
                 param_k.data.copy_(param_q.data)  # initialize
                 param_k.requires_grad = False  # not update by gradient
 
+
         self.assigner = HungarianMatcher3d(
             cost_class=self.model_cfg['target_assigner_config']['hungarian_assigner']['cls_cost'],   # 1.0
             cost_bbox=self.model_cfg['target_assigner_config']['hungarian_assigner']['bbox_cost'],   # 4.0
             cost_giou=self.model_cfg['target_assigner_config']['hungarian_assigner']['iou_cost'],    # 2.0
             cost_rad=self.model_cfg['target_assigner_config']['hungarian_assigner']['rad_cost'],     # 4.0
+            iou_rectifier=self.iou_rectifier,
+            iou_cls=self.iou_cls
         )
 
         weight_dict = {
@@ -327,37 +324,47 @@ class ConQueRHead(nn.Module):
         # decoder
         outputs_classes = []
         outputs_coords = []
+        outputs_ious = []
+
         for idx in range(hidden_state.shape[0]): # 这里是遍历6层
             if idx == 0:
                 reference = init_reference
             else:
                 reference = inter_references[idx - 1]
-            outputs_class, outputs_coord = self.transformer.decoder.detection_head(hidden_state[idx], # 每一层明明已经产出过对应的结果了，为什么有又进行一遍输出头？答：对比学习的辅助输出参数不同步，这里应该是这个考虑？
+            outputs_class, outputs_coord, outputs_iou = self.transformer.decoder.detection_head(hidden_state[idx], # 每一层明明已经产出过对应的结果了，为什么有又进行一遍输出头？答：对比学习的辅助输出参数不同步，这里应该是这个考虑？
                                                                                                 reference, idx) # 根据每一层的query特征，和reference重新来一次输出头，但是与之前不一样的是，这次会带上GT以及GT噪声正样本， 这部分来自于对比学习
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
+            outputs_ious.append(outputs_iou)
+
         outputs_class = torch.stack(outputs_classes) # (6, B, pad_size + 1000 + 4*max_gt_num, 1)
         outputs_coord = torch.stack(outputs_coords) # (6, B, pad_size + 1000 + 4*max_gt_num, 7)
+        outputs_iou = torch.stack(outputs_ious) # (6, B, pad_size + 1000 + 4*max_gt_num, 1)
 
         # dn post process
         '''
         去噪组分开
         outputs_class:  (6, B, 1000 + 4*max_gt_num, 1)
         outputs_coord:  (6, B, 1000 + 4*max_gt_num, 7)
+        outputs_iou:    (6, B, 1000 + 4*max_gt_num, 1)
+
         dn_meta = {
             "pad_size":                 2 * max_gt_num * 3
             "num_dn_group":             3
             "output_known_lbs_bboxes":  {
                 "pred_logits":  (B, pad_size, 1) 最后一层的预测结果 这个是噪声样本
                 "pred_boxes":   (B, pad_size, 7) 
-                "aux_outputs":  List[Dict{"pred_logits": (B, pad_size, 3), "pred_boxes": (B, pad_size, 7), ...] 五个，表示每一层的噪声样本                 
+                "pred_ious":    (B, pad_size, 1) 
+
+                "aux_outputs":  List[Dict{"pred_logits": (B, pad_size, 3), "pred_boxes": (B, pad_size, 7), "pred_ious": (B, pad_size, 1)}...] 五个，表示每一层的噪声样本                 
             }
         }
         '''
         if dn['dn_number'] > 0 and dn_meta is not None:
-            outputs_class, outputs_coord = dn_post_process(
+            outputs_class, outputs_coord, outputs_iou = dn_post_process_w_ious(
                 outputs_class,
                 outputs_coord,
+                outputs_iou,
                 dn_meta,
                 self.aux_loss, # 使用辅助损失
                 self._set_aux_loss,
@@ -366,11 +373,13 @@ class ConQueRHead(nn.Module):
         # only for supervision
         enc_outputs = None
         if self.train_flag: # 防止梯度流被污染，DQS只是辅助筛选query，筛选时不能参与梯度计算，否则训练早期低质量的query会大幅度影响结果，因此在DQS中必须要detach
-            enc_class, enc_coords = self.transformer.proposal_head(src_embed, src_ref_windows) # 这个之前是dqs打分用的，这里输入的是和当时一样的输入，即获得当时的打分结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
+            enc_class, enc_coords, enc_ious = self.transformer.proposal_head(src_embed, src_ref_windows) # 这个之前是dqs打分用的，这里输入的是和当时一样的输入，即获得当时的打分结果，注意，筛选操作存在detach操作，分开到这里做损失实际上是防止梯度流被污染
             enc_outputs = {
                 'topk_indexes': src_indexes,    # (B, 1000, 1) # 通过dqs挑选的1000个query的索引
                 'pred_logits': enc_class,       # (B, H*W, 1)
                 'pred_boxes': enc_coords,       # (B, H*W, 7)
+                'pred_ious': enc_ious,      # (B, H*W, 1)
+
             }
 
         # compute decoder losses
@@ -378,8 +387,11 @@ class ConQueRHead(nn.Module):
             # "pred_scores_mask": score_mask, # (B, H, W)
             "pred_logits": outputs_class[-1][:, : self.num_queries],    # (B, 1000, 1) # 最后一层
             "pred_boxes": outputs_coord[-1][:, : self.num_queries],     # (B, 1000, 7)
+            'pred_ious': outputs_iou[-1][:, : self.num_queries],        # (B, 1000, 1)
+
             "aux_outputs": self._set_aux_loss(
-                outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
+                outputs_class[:-1, :, : self.num_queries], outputs_coord[:-1, :, : self.num_queries],
+                outputs_iou[:-1, :, : self.num_queries],  # List[Dict{"pred_logits": (B, 1000, 3), "pred_boxes": (B, 1000, 7), ...] 5个元素 表示前五层的1000个query
             ),
         }
         if self.train_flag:
@@ -420,7 +432,11 @@ class ConQueRHead(nn.Module):
         outputs = pred_dicts['outputs']
         out_logits = outputs['pred_logits'] # (B, 1000, 1) B在验证或者测试的时候一定是 ==1
         out_bbox = outputs['pred_boxes'] # (B, 1000, 7)
+        out_iou = (outputs['pred_ious'] + 1) / 2 # (B, 1000, 1) 映射到0-1
         batch_size = out_logits.shape[0]
+
+        out_iou = out_iou.repeat([1, 1, out_logits.shape[-1]])
+        out_iou = out_iou.view(out_logits.shape[0], -1) # （B, 1000）
 
         out_prob = out_logits.sigmoid()
         out_prob = out_prob.view(out_logits.shape[0], -1) # (B, 1000)
@@ -437,6 +453,19 @@ class ConQueRHead(nn.Module):
             out_prob_i = out_prob[i] # （1000，）
             out_bbox_i = out_bbox[i] # (1000, 7)
 
+            out_iou_i = out_iou[i] # (1000, )
+
+            # 用 qs 来输出
+            # mask = torch.ones_like(out_prob_i) # (1000, ) 全1
+            # score_mask = out_prob_i > 0.2 # (1000, )  大于阈值的全部置为True
+            # mask = mask * score_mask.type_as(mask) # 再将Cyclist对应的部分mask掉，这是因为这种类别不均衡切置信度一般不高，可能引入噪声会影响IoU校准
+
+            # if isinstance(self.iou_rectifier, float):
+            #     temp_probs = torch.pow(out_prob_i, 1 - self.iou_rectifier) * torch.pow(out_iou_i, self.iou_rectifier)
+            #     out_prob_i = out_prob_i * (1 - mask) + mask * temp_probs
+            # else:
+            #     raise TypeError('only list or float')
+            
             '''
             # out_prob_i_ori = out_prob_i.view(out_bbox_i.shape[0], -1)  # [1000, 3]
             # max_out_prob_i, pred_cls = torch.max(out_prob_i_ori, dim=-1)
@@ -494,21 +523,33 @@ class ConQueRHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.15, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.1, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
 
+            ious = out_iou_i[topk_indices_i] # (n, )
 
             scores_list = list()
             labels_list = list()
-            boxes_list = list()
+            boxes_list = list() 
 
             for c in range(self.num_classes):
                 mask = (labels - 1) == c # 对于分类无关来说其实是全True ，(n, ), 对于多分类的来说其实就是依次处理每个分类用的
                 scores_temp = scores[mask]
+                ious_temp = ious[mask]
                 labels_temp = labels[mask]
                 boxes_temp = boxes[mask]
+
+                if isinstance(self.iou_rectifier, list):
+                    iou_rectifier = torch.tensor(self.iou_rectifier).to(out_prob)[c]
+                    scores_temp = torch.pow(scores_temp, 1 - iou_rectifier) * torch.pow(ious_temp,
+                                                                                        iou_rectifier)
+                elif isinstance(self.iou_rectifier, float): # 类别无关 0.68 这又是在算质量得分
+                    scores_temp = torch.pow(scores_temp, 1 - self.iou_rectifier) * torch.pow(ious_temp,
+                                                                                                self.iou_rectifier)
+                else:
+                    raise TypeError('only list or float')
 
                 scores_list.append(scores_temp)
                 labels_list.append(labels_temp)
@@ -691,9 +732,9 @@ class ConQueRHead(nn.Module):
             pred_boxes[:, 8] = (pred_boxes[:, 8]) * (self.point_cloud_range[4] - self.point_cloud_range[1])
         return pred_boxes
 
-    def _set_aux_loss(self, outputs_class, outputs_coord):
-        return [{"pred_logits": a, "pred_boxes": b} for a, b in
-                zip(outputs_class, outputs_coord)]
+    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_iou):
+        return [{"pred_logits": a, "pred_boxes": b, "pred_ious": c} for a, b, c in
+                zip(outputs_class, outputs_coord, outputs_iou)]
 
 # vfl loss
 class VariFocalLoss(nn.Module):
@@ -733,7 +774,7 @@ class VariFocalLoss(nn.Module):
             src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
-            target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
+            target_score_o[idx[0], topk_indexes[idx].squeeze(-1)] = ious.to(target_score_o.dtype) # (B, HW)
             # print('sum target is ', target_classes_onehot.sum())
         else:
             self.src_logits = src_logits[idx]
@@ -826,6 +867,12 @@ class MatchabilityAwareLoss(nn.Module):
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
 
+        # print("------------------------------------------------------------------------------------")
+        # print("target_score_o shape ", target_score_o.shape)
+        # print("target_classes_onehot shape ", target_classes_onehot.shape)
+        # print("ious shape ", ious.shape)
+        # print("ious ==> ", ious)
+
         target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
 
         pred_score = F.sigmoid(src_logits).detach() # （B, HW, 1） det损失时为 (B, 1000, 1)
@@ -848,6 +895,10 @@ class MatchabilityAwareLoss(nn.Module):
         losses = {
             "loss_ce": loss_ce,
         }
+        # print("weight ==> ", weight)
+        # print("loss_ce ==> ", loss_ce)
+        # xxx
+        # print("------------------------------------------------------------------------------------")
 
         return losses
 
@@ -868,10 +919,7 @@ class ClassificationLoss(nn.Module):
     ):
         # 输入的两项形状都为 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 预测结果 & one-hot编码
         p = torch.sigmoid(logits)
-        # print("p.shape is ", p.shape)
-        # print("targets.shape is ", targets.shape)
-        # print("targets is ", targets)
-        # xxx
+
         ce_loss = F.binary_cross_entropy(p, targets, reduction="none") # 二元交叉熵 (B, H*W, 1) 或者 det损失时是(B, 1000, 1) 
         p_t = p * targets + (1 - p) * (1 - targets)
         loss = ce_loss * ((1 - p_t) ** gamma) # 包含调节因子，初步形成focal loss
@@ -895,9 +943,6 @@ class ClassificationLoss(nn.Module):
 
         idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, )
-        # print("indices is ", indices)
-        # print("t['labels'] is ", targets[0]['labels'])
-        # print("target_classes_o is ", target_classes_o)
 
         # for metrics calculation
         self.target_classes = target_classes_o
@@ -906,7 +951,6 @@ class ClassificationLoss(nn.Module):
             topk_indexes = outputs["topk_indexes"] # (B, 1000, 1) dqs结果索引
             self.src_logits = torch.gather(src_logits, 1, topk_indexes.expand(-1, -1, src_logits.shape[-1]))[idx] # (B, 1000, 1)
             target_classes_onehot[idx[0], topk_indexes[idx].squeeze(-1), target_classes_o] = 1 # 索引到对应的位置 根据不同的类别，索引后为1，形成了one-hot编码
-            # print('sum target is ', target_classes_onehot.sum())
         else:
             self.src_logits = src_logits[idx]
             # 0 for bg, 1 for fg
@@ -952,8 +996,14 @@ class RegressionLoss(nn.Module):
                 1,
                 outputs["topk_indexes"].expand(-1, -1, outputs["pred_boxes"].shape[-1]),
             ) # （B, 1000, 7）
+            pred_ious = torch.gather(
+                outputs["pred_ious"],
+                1,
+                outputs["topk_indexes"].expand(-1, -1, outputs["pred_ious"].shape[-1]),
+            ) # （B, 1000, 1）
         else:
             pred_boxes = outputs["pred_boxes"] # （B, 1000, 7）如果是去噪gt （B, pad_size, 7）
+            pred_ious = outputs["pred_ious"] # （B, 1000, 1）
 
         target_boxes = torch.cat([t["gt_boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0) # 索引到最佳匹配的gt (n1+n2+..., 7) 也可能是去噪正样本（3*(n1-1) +  3*(n2-1), ....), ）
 
@@ -978,11 +1028,15 @@ class RegressionLoss(nn.Module):
             "loss_rad": loss_rad.sum() / num_boxes,
         }
 
+        pred_ious = pred_ious[idx] # （n_all, 1）
+
         box_preds = self.decode_func(torch.cat([src_boxes, src_rads], dim=-1)) # 反归一化
         box_target = self.decode_func(torch.cat([target_boxes, target_rads], dim=-1))
         iou_target = iou3d_nms_utils.paired_boxes_iou3d_gpu(box_preds, box_target) # (n_all, ) iou
         iou_target = iou_target * 2 - 1 # (0, 1) map 到 (-1, 1)
         iou_target = iou_target.detach()
+        loss_iou = F.l1_loss(pred_ious, iou_target.unsqueeze(-1), reduction="none")
+        losses.update({"loss_iou": loss_iou.sum() / num_boxes})
 
         return losses
 

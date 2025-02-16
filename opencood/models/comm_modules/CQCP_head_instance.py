@@ -668,8 +668,8 @@ class CQCPInstanceHead(nn.Module):
 
         return new_ret_dict
 
-    def compute_losses(self, outputs, targets, dn_meta=None):
-        loss_dict = self.losses(outputs, targets, dn_meta=dn_meta)
+    def compute_losses(self, outputs, targets, dn_meta=None, supervise_iou=False):
+        loss_dict = self.losses(outputs, targets, dn_meta=dn_meta, supervise_iou=supervise_iou)
 
         weight_dict = self.losses.weight_dict
         for k, v in loss_dict.items():
@@ -759,7 +759,7 @@ class CQCPInstanceHead(nn.Module):
         enc_outputs = pred_dicts['enc_outputs']
         bin_targets = copy.deepcopy(targets_single)
         # [tgt["labels"].fill_(0) for tgt in bin_targets] NOTE 这个是Github Issue提出的，注释掉后带来了0.2-0.3的提升，这是为什么？ 如果不注释，其实就变成类别无关预测 答：其实这里就是ConQuer的代码中的设置 作者忘删除了，seed 中的dqs就是需要多分类的
-        enc_losses = self.compute_losses(enc_outputs, bin_targets) # encoder的结果先作为detect输出监督 query 选择
+        # enc_losses = self.compute_losses(enc_outputs, bin_targets) # encoder的结果先作为detect输出监督 query 选择
         # for k, v in enc_losses.items():
         #     loss_all += v
         #     loss_dict.update({k + "_enc": v.item()})
@@ -767,49 +767,49 @@ class CQCPInstanceHead(nn.Module):
         # for k, v in enc_losses.items():
         #     loss_dict.update({k + "_debug": v})
         outputs = pred_dicts['outputs']
-        dec_losses = self.compute_losses(outputs, targets_single, dn_meta) # 这里注意是单车标签，因为我们先运行单车pipeline
+        # dec_losses = self.compute_losses(outputs, targets_single, dn_meta, supervise_iou=True) # 这里注意是单车标签，因为我们先运行单车pipeline
         # for k, v in dec_losses.items():
         #     loss_all += v
         #     loss_dict.update({k: v.item()})  # 这里包含了最后一层的检测结果损失，还有dn的去噪损失，以及辅助输出的五层的相应的检测和去噪损失
 
         # compute contrastive loss
-        if dn_meta is not None:
-            per_gt_num = [tgt["gt_boxes"].shape[0] for tgt in targets_single] # [n1, n2, ...]
-            max_gt = max(per_gt_num)
-            num_gts = sum(per_gt_num)
-            if num_gts > 0:
-                for li in range(self.model_cfg["num_decoder_layers"]): # 3层decoder
-                    contrastive_loss = 0.0
-                    projs = torch.cat((outputs_class[li], outputs_coord[li]), dim=-1) # (B, all_query_num + 4*max_gt_num, 7+1) 某一层的输出
-                    gt_projs = self.projector(projs[:, self.num_queries:].detach()) # gt 线性变化 # (B, 4*max_gt_num, 256) 注意这四批的gt前一批是真gt，后面三个则是噪声正样本 注意，这里detach是因为这里不能梯度回传，这个是将其映射到高维空间
-                    pred_projs = self.predictor(self.projector(projs[:, : self.num_queries])) # (B, all_query_num, 256) query需要额外的MLP，出自ConQueR论文中的设计
-                    # num_gts x num_locs
+        # if dn_meta is not None:
+        #     per_gt_num = [tgt["gt_boxes"].shape[0] for tgt in targets_single] # [n1, n2, ...]
+        #     max_gt = max(per_gt_num)
+        #     num_gts = sum(per_gt_num)
+        #     if num_gts > 0:
+        #         for li in range(self.model_cfg["num_decoder_layers"]): # 3层decoder
+        #             contrastive_loss = 0.0
+        #             projs = torch.cat((outputs_class[li], outputs_coord[li]), dim=-1) # (B, all_query_num + 4*max_gt_num, 7+1) 某一层的输出
+        #             gt_projs = self.projector(projs[:, self.num_queries:].detach()) # gt 线性变化 # (B, 4*max_gt_num, 256) 注意这四批的gt前一批是真gt，后面三个则是噪声正样本 注意，这里detach是因为这里不能梯度回传，这个是将其映射到高维空间
+        #             pred_projs = self.predictor(self.projector(projs[:, : self.num_queries])) # (B, all_query_num, 256) query需要额外的MLP，出自ConQueR论文中的设计
+        #             # num_gts x num_locs
 
-                    pos_idxs = list(range(1, dn_meta["num_dn_group"] + 1)) # [1, 2, 3]
-                    for bi, idx in enumerate(outputs["matched_indices"]): # 这个是[((n1,), (n1,)), ...]匹配结果
-                        sim_matrix = (
-                                self.similarity_f(
-                                    gt_projs[bi].unsqueeze(1),
-                                    pred_projs[bi].unsqueeze(0),
-                                )
-                                / self.tau
-                        )# 求得相似度矩阵(4*max_gt_num, all_query_num)
-                        matched_pairs = torch.stack(idx, dim=-1) # (n1, 2) 以第一个样本为例 
-                        neg_mask = projs.new_ones(self.num_queries).bool() # (all_query_num, )
-                        neg_mask[matched_pairs[:, 0]] = False # 最佳匹配的query标记成False, 换言之，没匹配上的都是True HACK 这里有个问题，负样本不应该是999个吗，它这样相当于负样本变少了，即使匹配上了，彼此之间应该还是负样本
-                        for pair in matched_pairs: # 遍历配对后的每一对
-                            pos_mask = torch.tensor([int(pair[1] + max_gt * pi) for pi in pos_idxs],
-                                                    device=sim_matrix.device) # 这个是用来筛选gt的 明明是4*max_gt_num，但是选择了后面三批带噪声的gt，也就是选了三个(3, )
-                            pos_pair = sim_matrix[pos_mask, pair[0]].view(-1, 1) # 正样本 （3，1）
-                            neg_pairs = sim_matrix[:, neg_mask][pos_mask] # 负样本，(3, all_query_num-n1) XXX 注意这里是不是有问题，这是为了简化逻辑？❓
-                            loss_gti = (
-                                    torch.log(torch.exp(pos_pair) + torch.exp(neg_pairs).sum(dim=-1, keepdim=True))
-                                    - pos_pair
-                            ) # （3， 1） 
-                            contrastive_loss += loss_gti.mean() # 3组gt对比，求均值再加上去
-                    loss_contrastive_dec_li = self.contras_loss_coeff * contrastive_loss / num_gts # 乘上系数=0.2后要除以gt总数，以均衡不同样本的gt数不同引起的数值波动
-                    # loss_all += loss_contrastive_dec_li
-                    # loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
+        #             pos_idxs = list(range(1, dn_meta["num_dn_group"] + 1)) # [1, 2, 3]
+        #             for bi, idx in enumerate(outputs["matched_indices"]): # 这个是[((n1,), (n1,)), ...]匹配结果
+        #                 sim_matrix = (
+        #                         self.similarity_f(
+        #                             gt_projs[bi].unsqueeze(1),
+        #                             pred_projs[bi].unsqueeze(0),
+        #                         )
+        #                         / self.tau
+        #                 )# 求得相似度矩阵(4*max_gt_num, all_query_num)
+        #                 matched_pairs = torch.stack(idx, dim=-1) # (n1, 2) 以第一个样本为例 
+        #                 neg_mask = projs.new_ones(self.num_queries).bool() # (all_query_num, )
+        #                 neg_mask[matched_pairs[:, 0]] = False # 最佳匹配的query标记成False, 换言之，没匹配上的都是True HACK 这里有个问题，负样本不应该是999个吗，它这样相当于负样本变少了，即使匹配上了，彼此之间应该还是负样本
+        #                 for pair in matched_pairs: # 遍历配对后的每一对
+        #                     pos_mask = torch.tensor([int(pair[1] + max_gt * pi) for pi in pos_idxs],
+        #                                             device=sim_matrix.device) # 这个是用来筛选gt的 明明是4*max_gt_num，但是选择了后面三批带噪声的gt，也就是选了三个(3, )
+        #                     pos_pair = sim_matrix[pos_mask, pair[0]].view(-1, 1) # 正样本 （3，1）
+        #                     neg_pairs = sim_matrix[:, neg_mask][pos_mask] # 负样本，(3, all_query_num-n1) XXX 注意这里是不是有问题，这是为了简化逻辑？❓
+        #                     loss_gti = (
+        #                             torch.log(torch.exp(pos_pair) + torch.exp(neg_pairs).sum(dim=-1, keepdim=True))
+        #                             - pos_pair
+        #                     ) # （3， 1） 
+        #                     contrastive_loss += loss_gti.mean() # 3组gt对比，求均值再加上去
+        #             loss_contrastive_dec_li = self.contras_loss_coeff * contrastive_loss / num_gts # 乘上系数=0.2后要除以gt总数，以均衡不同样本的gt数不同引起的数值波动
+        #             loss_all += loss_contrastive_dec_li
+        #             loss_dict.update({'loss_contrastive_dec_' + str(li): loss_contrastive_dec_li.item()})
 
         fused_dict = {}
         bs = len(outputs["fused_logits"]) # len([(1,n1_all,1), (1,n2_all,1)...])
@@ -822,7 +822,7 @@ class CQCPInstanceHead(nn.Module):
                 "pred_boxes": outputs["fused_boxes"][bi]
             }
             
-            fused_losses = self.compute_losses(fused_outputs, [targets[bi]])
+            fused_losses = self.compute_losses(fused_outputs, [targets[bi]], supervise_iou=True)
             for k, v in fused_losses.items():
                 if k not in fused_dict:
                     fused_dict[k] = 0
@@ -831,7 +831,8 @@ class CQCPInstanceHead(nn.Module):
         for k, v in fused_dict.items():
             v_mean = v / bs
             loss_all += v_mean
-            loss_dict.update({k + '_fused': v.item()})
+            loss_dict.update({k + '_fused': v_mean.item()})
+
         # pred_scores_mask = outputs['pred_scores_mask'] # (B, H, W)
         # loss_score = self.compute_score_losses(pred_scores_mask, gt_bboxes_3d_single.to(torch.float32), gt_bboxes_3d_mask_single, None) # 前景预测损失
         # loss_all += loss_score
@@ -1101,13 +1102,17 @@ class MatchabilityAwareLoss(nn.Module):
         
         idx = _get_src_permutation_idx(indices) # 返回两个索引量，[batch索引(n_all, )，最佳匹配query索引(n_all, )]
 
+        if idx[0].shape == torch.Size([0]): # 这里是没有GT的情况，这个时候简单一点处理，直接损失为0，但是其实应该让置信度预测偏0
+            losses = {
+                "loss_ce": 0.0,
+            }
+
+            return losses
+
         target_boxes = torch.cat([t['gt_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # (n_all, 7)
         target_boxes = self.decode_func(target_boxes)
 
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)]) # 索引到最佳匹配的gt label (n_all, ) n_all=n1+n2+...
-        # print("indices is ", indices)
-        # print("t['labels'] is ", targets[0]['labels'])
-        # print("target_classes_o is ", target_classes_o)
 
         # for metrics calculation
         self.target_classes = target_classes_o
@@ -1121,14 +1126,11 @@ class MatchabilityAwareLoss(nn.Module):
 
             src_boxes = outputs['pred_boxes'][idx[0], topk_indexes[idx].squeeze(-1)] # (n_all. 7)
             src_boxes = self.decode_func(src_boxes)
-            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
-            # print("outputs['pred_boxes'] shape ", outputs['pred_boxes'].shape)
-            # print("ious shape ", ious.shape)
+            ious = iou3d_nms_utils.boxes_iou_bev(src_boxes, target_boxes) # (n_all, n_all)
 
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx[0], topk_indexes[idx].squeeze(-1)] = ious.to(target_score_o.dtype) # (B, HW)
-            # print('sum target is ', target_classes_onehot.sum())
-            # print('ious shape is ', ious.shape)
+
         else:
             self.src_logits = src_logits[idx]
             # 0 for bg, 1 for fg
@@ -1136,15 +1138,9 @@ class MatchabilityAwareLoss(nn.Module):
             target_classes_onehot[idx[0], idx[1], target_classes_o] = 1
             src_boxes = outputs['pred_boxes'][idx[0], idx[1]] # (n_all. 7)
             src_boxes = self.decode_func(src_boxes)
-            ious = iou3d_nms_utils.boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            ious = iou3d_nms_utils.boxes_iou_bev(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
-
-        # print("------------------------------------------------------------------------------------")
-        # print("target_score_o shape ", target_score_o.shape)
-        # print("target_classes_onehot shape ", target_classes_onehot.shape)
-        # print("ious shape ", ious.shape)
-        # print("ious ==> ", ious)
 
         target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数
 
@@ -1168,10 +1164,6 @@ class MatchabilityAwareLoss(nn.Module):
         losses = {
             "loss_ce": loss_ce,
         }
-        # print("weight ==> ", weight)
-        # print("loss_ce ==> ", loss_ce)
-        # xxx
-        # print("------------------------------------------------------------------------------------")
 
         return losses
 
@@ -1319,6 +1311,7 @@ class Det3DLoss(nn.Module):
         self.aux_loss = aux_loss
 
         self.det3d_losses = nn.ModuleDict()
+        self.supervise_iou_loss = MatchabilityAwareLoss(0.25, decode_func=decode_func)
         for loss in losses:
             if loss == "boxes":
                 self.det3d_losses[loss] = RegressionLoss(decode_func=decode_func)
@@ -1348,7 +1341,7 @@ class Det3DLoss(nn.Module):
 
         return output_known_lbs_bboxes, single_pad, num_dn_groups
 
-    def forward(self, outputs, targets, dn_meta=None):
+    def forward(self, outputs, targets, dn_meta=None, supervise_iou=False):
         '''
         outputs: Dict, DQS结果或者是模型输出的结果
         targets: List [Dict{}, Dict{}...] batch中按样本分结果
@@ -1421,6 +1414,10 @@ class Det3DLoss(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs, targets) # List[((n1),(n1)), ...] 匹配结果索引，注意，这是1000个query与gt的匹配
+        if supervise_iou:
+            losses.update(self.supervise_iou_loss(outputs, targets, indices, num_boxes))
+            losses.update(self.det3d_losses["boxes"](outputs, targets, indices, num_boxes))
+            return losses
         for loss in self.losses: # ["focal_labels", "boxes"]
             losses.update(self.det3d_losses[loss](outputs, targets, indices, num_boxes))
 

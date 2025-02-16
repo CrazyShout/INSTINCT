@@ -1,0 +1,165 @@
+name: opv2v_point_pillar_uncertainty_late_fusion
+root_dir: "my_v2xset/train"
+validate_dir: "my_v2xset/validate"
+test_dir: "my_v2xset/test"
+
+yaml_parser: "load_point_pillar_params"
+train_params:
+  batch_size: &batch_size 16
+  epoches: 60
+  eval_freq: 1
+  save_freq: 1
+
+input_source: ['lidar']
+label_type: 'lidar'
+
+comm_range: 70
+only_vis_ego: true
+
+fusion:
+  core_method: 'late'
+  dataset: 'v2xset'
+  args: []
+
+# preprocess-related
+preprocess:
+  # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+  core_method: 'SpVoxelPreprocessor'
+  args:
+    voxel_size: &voxel_size [0.4, 0.4, 4]
+    max_points_per_voxel: 32
+    max_voxel_train: 16000
+    max_voxel_test: 40000
+  # lidar range for each individual cav.
+  cav_lidar_range: &cav_lidar [-70.4, -40, -3, 70.4, 40, 1]
+
+data_augment:
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x' ]
+
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
+# anchor box related
+postprocess:
+  core_method: 'UncertaintyVoxelPostprocessor' # VoxelPostprocessor, BevPostprocessor supported
+  gt_range: *cav_lidar
+  anchor_args:
+    cav_lidar_range: *cav_lidar
+    l: 3.9
+    w: 1.6
+    h: 1.56
+    r: &anchor_yaw [0, 90]
+    feature_stride: 2
+    num: &anchor_num 2
+  target_args:
+    pos_threshold: 0.6
+    neg_threshold: 0.45
+    score_threshold: 0.20
+  order: 'hwl' # hwl or lwh
+  max_num: 100 # maximum number of objects in a single frame. use this number to make sure different frames has the same dimension in the same batch
+  nms_thresh: 0.15
+  dir_args: &dir_args
+    dir_offset: 0.7853
+    num_bins: 2
+    anchor_yaw: *anchor_yaw
+
+# model related
+model:
+  core_method: point_pillar_uncertainty
+  args:
+    voxel_size: *voxel_size
+    lidar_range: *cav_lidar
+    anchor_number: *anchor_num
+    dir_args: *dir_args
+    pillar_vfe:
+      use_norm: true
+      with_distance: false
+      use_absolute_xyz: true
+      num_filters: [64]
+    point_pillar_scatter:
+      num_features: 64
+
+    base_bev_backbone:
+      resnet: true
+      use_dropout: True
+      dropout_enable: False # 这个会使得单车在train以及test的时候dropout都开启
+      layer_nums: [3, 4, 5]
+      layer_strides: [2, 2, 2]
+      num_filters: [128, 256, 512]
+      upsample_strides: [1, 2, 4]
+      num_upsample_filter: [128, 128, 128]
+      compression: 0
+      voxel_size: *voxel_size
+
+    shrink_header: # 单车训练中原本没有这个
+      use_atten: true
+      kernal_size: [ 3 ]
+      stride: [ 1 ]
+      padding: [ 1 ]
+      dim: [ 256 ]
+      input_dim: 384 # 128 * 3   
+
+    uncertainty_dim: &uncertainty_dim 3
+    re_parameterization: true # 控制是否使用重参数化来衡量分类的数据不确定性
+    mc_dropout:
+      dropout_rate: 0.1
+      inference_stage: false
+      inference_num: 10
+
+      # TODO 单车这里先copy的dair的，后面需要更改
+      tp_score_mean: 0.6466 #0.6251
+      tp_score_std: 0.1572 #0.1549
+      tp_data_ucls_mean: 0.0617 #0.1047
+      tp_data_ucls_std: 0.0139 #0.0225
+      tp_model_ucls_mean: 0.8584 #0.8793
+      tp_model_ucls_std: 0.1207 #0.1095
+      data_ureg_mean: 6.2710 #6.3410
+      data_ureg_std: 1.9526 #1.9687
+      model_ureg_mean: 0.0440 #0.0441
+      model_ureg_std: 0.0196 #0.0207
+
+loss:
+  core_method: point_pillar_uncertainty_loss
+  args:
+    pos_cls_weight: 1.0
+    cls:
+      type: 'SigmoidFocalLoss'
+      alpha: 0.25
+      gamma: 2.0
+      weight: 1.0
+    reg:
+      type: 'WeightedSmoothL1Loss'
+      sigma: 3.0
+      codewise: true
+      weight: 2.0
+    dir:
+      type: 'WeightedSoftmaxClassificationLoss'
+      weight: 0.2
+      args: *dir_args
+
+    uncertainty:    
+      weight: 0.25
+      angle_weight: 0.5
+      dim: *uncertainty_dim
+      xy_loss_type: l2
+      angle_loss_type: von-mise
+      lambda_V: 0.001
+      s0: 1
+      limit_period: True
+
+optimizer:
+  core_method: Adam
+  lr: 0.001
+  args:
+    eps: 1e-10
+    weight_decay: 1e-4
+
+lr_scheduler:
+  core_method: multistep #step, multistep and Exponential support
+  gamma: 0.1
+  step_size: [10, 20]
+

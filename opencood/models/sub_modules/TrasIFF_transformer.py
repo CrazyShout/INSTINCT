@@ -1173,7 +1173,8 @@ class TransformerDecoder(nn.Module):
             else:
                 output = layer(idx, output, query_pos, memory, memory_shape, memory_start_idx, ref_windows, attn_mask)
             new_ref_logits, new_ref_windows = self.detection_head(output, ref_windows[..., :7], idx)
-            new_ref_probs = new_ref_logits.sigmoid()
+            # new_ref_logits, new_ref_windows, new_ref_ious = self.detection_head(output, ref_windows[..., :7], idx)
+            new_ref_probs = new_ref_logits.sigmoid() # (B, num_queries, 1)
             ref_windows = torch.cat(
                 (
                     new_ref_windows.detach(),
@@ -1184,10 +1185,19 @@ class TransformerDecoder(nn.Module):
             intermediate.append(output)
             intermediate_ref_windows.append(new_ref_windows)
             if return_bboxes:
+                self.iou_rectifier = 0.68
+
+                # # quality based select
+                # mask = (new_ref_probs > 0.2).int() # (B, num_queries, 1)
+                # new_ref_ious = (new_ref_ious + 1) / 2
+                # temp_probs = torch.pow(new_ref_probs, 1 - self.iou_rectifier) * torch.pow(new_ref_ious, self.iou_rectifier)
+                # new_ref_probs = new_ref_probs * (1 - mask) + mask * temp_probs
+
                 res_boxes = torch.cat(
                     (
                         new_ref_windows.detach(),
                         new_ref_probs.detach(),
+                        # new_ref_ious.detach(),
                     ),
                     dim=-1,
                 )
@@ -2398,7 +2408,7 @@ class TransformerInstanceV1(nn.Module):
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
         self.fd_atten = Fusion_Decoder(d_model)
 
-        self.agent_embed = nn.Parameter(torch.Tensor(2, d_model))
+        self.agent_embed = nn.Parameter(torch.Tensor(5, d_model))
         self.pos_embed_layer = MLP(8, d_model, d_model, 3)
         self.sample_idx = 0
         self.parameters_fix()
@@ -2738,6 +2748,585 @@ class TransformerInstanceV1(nn.Module):
         all_queries = []
         ref_bboxes = []
         solo_bboxes = []
+
+        # print("record_len is ", record_len)
+        # print("memory_discrete shape is ", memory_discrete.shape)
+        # print("pairwise_t_matrix shape is ", pairwise_t_matrix.shape)
+        for bid in range(len(record_len)):
+            N = record_len[bid] # number of valid agent
+            t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
+            t_matrix_ref = pairwise_t_matrix_ref[bid][:N, :N, :, :] # (N, N, 4, 4)
+            select_bbox_b = boxes_before_trans_batch_lst[bid] # (N, 8, H，W) 
+            memory_discrete_b = memory_discrete_batch_lst[bid] # (N, C, H, W)
+            memory_mask_b = memory_mask_batch_lst[bid] # (N, 1, H, W)
+
+            # memory_b = memory_batch_lst[bid] # (N, HW, C)
+            # memory_b = memory_b.permute(0, 2, 1).reshape(memory_b.shape[0], memory_b.shape[-1], H, W) 
+
+            # neighbor_memory_dense = warp_affine_simple(memory_b, t_matrix[0, :, :, :], (H, W), mode='bilinear') # (N, C, H, W)
+
+            # print("---------------------------------------------------------")
+            # print("N is ", N)
+            # print("t_matrix shape is ", t_matrix.shape)
+            # print("memory_discrete_b shape is ", memory_discrete_b.shape)
+            # print("---------------------------------------------------------")
+
+            neighbor_memory = warp_affine_simple(memory_discrete_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, C, H, W)
+            neighbor_memory_mask = warp_affine_simple(memory_mask_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 1, H, W)
+            neighbor_select_bbox_b = warp_affine_simple(select_bbox_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 8, H，W) 
+
+            # import matplotlib.pyplot as plt
+            # import os
+            # if self.sample_idx % 20 == 0:
+            #     save_dir = "./feature_vis_gaussian"
+            #     os.makedirs(save_dir, exist_ok=True)
+            #     for b in range(N):
+            #         confidence = neighbor_select_bbox_b[b, 7, :, :] # (H, W)
+            #         mask = (confidence > 0.1).float()
+            #         # mask = mask.unsqueeze(1)
+            #         feature_map = neighbor_memory[b]
+            #         feature_map = feature_map.mean(dim=0)
+            #         feature_mask = neighbor_memory_mask[b]
+            #         feature_mask = mask
+
+            #         # 将特征图归一化到 [0, 255]
+            #         def normalize_to_image(tensor):
+            #             tensor = tensor - tensor.min()
+            #             tensor = tensor / tensor.max()
+            #             return (tensor * 255).byte()
+                    
+            #         dense_feature = normalize_to_image(feature_map)
+            #         feature_mask = normalize_to_image(feature_mask)
+            #         # 转为 NumPy 格式
+            #         dense_feature_np = dense_feature.cpu().numpy()
+            #         feature_mask_np = feature_mask.cpu().numpy()
+
+            #         # 创建可视化画布
+            #         fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+            #         axes[0].imshow(dense_feature_np, cmap="viridis")
+            #         axes[0].set_title("Dense Feature")
+            #         axes[0].axis("off")
+            #         axes[1].imshow(feature_mask_np, cmap="viridis")
+            #         axes[1].set_title("Sparse Mask")
+            #         axes[1].axis("off")
+
+            #         # plt.figure(figsize=(20, 10))
+            #         # plt.imshow(dense_feature_np, cmap="viridis")
+            #         # plt.axis("off")
+
+            #         # 保存到文件
+            #         plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+            #         plt.close() 
+            # self.sample_idx += 1
+            
+            neighbor_memory = neighbor_memory.flatten(2).permute(0, 2, 1) # (N, HW, C)
+            neighbor_memory_mask = neighbor_memory_mask.flatten(2).permute(0, 2, 1) # (N, HW, 1) 这个里面有0有1, 1的地方就是对应其有效的query
+            neighbor_select_bbox_b = neighbor_select_bbox_b.flatten(2).permute(0, 2, 1) # (N, HW, 8) 
+
+            neighbor_mask = neighbor_memory_mask.squeeze(-1).bool() # (N, HW)
+            valid_query_lst = [neighbor_memory[i][neighbor_mask[i]] for i in range(N)] # [(n1, C), (n2, C)...]
+            valid_bbox_lst = [neighbor_select_bbox_b[i][neighbor_mask[i]] for i in range(N)] # [(n1, 8), (n2, 8)...]
+            # valid_query_lst = valid_query_lst[1:]
+            # valid_bbox_lst = valid_bbox_lst[1:]
+            valid_bbox_norm_lst = [] # [(n1, 8), (n2, 8)...] 
+
+            for id in range(len(valid_bbox_lst)):
+                valid_box = valid_bbox_lst[id] # (n, 8)
+                valid_box_center = self.box_decode_func(valid_box[..., :7]) # (n, 7) 反归一化 变到点云坐标系中的坐标
+                valid_box_corner = box_utils.boxes_to_corners_3d(valid_box_center, 'lwh') # (n, 8, 3)
+                projected_bbox_corner = box_utils.project_box3d(valid_box_corner.float(), t_matrix_ref[id, 0].float()) # TODO WHY???
+                projected_bbox_center = box_utils.corners_to_boxes_3d(projected_bbox_corner, 'lwh') # (n, 7)
+                projected_bbox_center_norm = self.box_encode_func(projected_bbox_center) # 重新归一化
+                # print("t_matrix_ref[0, id] is ", t_matrix_ref[0, id])
+                # print("t_matrix_ref[id, 0] is ", t_matrix_ref[id, 0])
+                # xxx
+                # projected_bbox_center = torch.cat([projected_bbox_center, valid_box[:, 7:]], dim=-1) # # (n, 8)
+                projected_bbox_center_norm = torch.cat([projected_bbox_center_norm, valid_box[:, 7:]], dim=-1) # # (n, 8)
+                # projected_bbox_center_norm = valid_box 
+
+                # valid_bbox_lst[id] = projected_bbox_center # 到这里后所有的box都统一到ego坐标系了 且所有的box都是真实坐标系，非归一化数值
+                valid_bbox_norm_lst.append(projected_bbox_center_norm)
+
+            # neighbor_index = torch.nonzero(neighbor_mask, as_tuple=False) # (N, HW)
+                
+            # 生成网格索引
+            i_indices = torch.arange(H, device=neighbor_mask.device).repeat(W).view(1, -1)  # (1, HW) 每H个元素复制一遍，复制W遍
+            j_indices = torch.arange(W, device=neighbor_mask.device).repeat_interleave(H).view(1, -1)  # (1, HW) # 这是每个元素复制H遍
+            # 扩展索引以匹配批次大小
+            i_indices = i_indices.expand(N, -1)  # (N, HW)
+            j_indices = j_indices.expand(N, -1)  # (N, HW)
+
+            # 提取有效位置的索引
+            # valid_i = i_indices[neighbor_mask == 1]  
+            # valid_j = j_indices[neighbor_mask == 1]  # 所有有效位置的 j 坐标
+
+            query_info_lst = []
+            for i in range(len(valid_query_lst)): # 遍历每个agent
+                n_q = valid_query_lst[i].size(0)
+                agent_queries = valid_query_lst[i] # (n, 8)
+                # agent_bboxes = valid_bbox_lst[i] # (n, 8)
+                agent_bboxes_norm = valid_bbox_norm_lst[i] # (n,8)
+                agent_pos_emb = self.pos_embed_layer(agent_bboxes_norm)
+                
+                valid_mask  = neighbor_mask[i] # (HW,)
+                valid_i = i_indices[i][valid_mask == 1] # 所有有效位置的 i 坐标 (n, )
+                valid_j = j_indices[i][valid_mask == 1] # 所有有效位置的 j 坐标
+                valid_2d_pos = torch.stack([valid_i, valid_j], dim=-1) # (n, 2)
+                # print("torch.sum(valid_mask) is ", torch.sum(valid_mask))
+                # print("valid_mask is ", valid_mask)
+                # print("valid_2d_pos is ", valid_2d_pos)
+                for j in range(n_q): # 遍历每个query
+                    query_info = {
+                        "agent_id": i,
+                        "box_norm": agent_bboxes_norm[j][:7], # （7）
+                        "position": agent_bboxes_norm[j][:2], # (2) cx, cy
+                        "bbox_size": agent_bboxes_norm[j][3:5], # (2) l, w
+                        # "heading": agent_bboxes[j][6:7],
+                        "2d_pos": valid_2d_pos[j], # (2,) 2d坐标
+                        "confidence": agent_bboxes_norm[j][7:],
+                        "pos_emb": agent_pos_emb[j], # 256
+                        "feature": agent_queries[j]
+                    }
+                    query_info_lst.append(query_info)
+            # 🌟 我们的主张是 将所有的query对应的box放在一起，判断两两iou，如果有某个和其他所有box的重合度都为0.1或者以下，认为它是独立检测，则这个不需要交互，直接参与最后的匹配
+            attn_mask, valid_indicies, indep_queries = gaussian_atten_mask_from_bboxes(query_info_lst, decode_box_func=self.box_decode_func) # (M, M)的Mask
+            # attn_mask = None
+            if attn_mask is not None:
+                valid_feat = []
+                valid_feat_pos = []
+                norm_bboxes = []
+                for vid in valid_indicies:
+                    per_query_feat = query_info_lst[vid]['feature']
+                    # per_query_feat_w_pos = query_info_lst[vid]['feature'] + query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
+                    per_query_pos = query_info_lst[vid]['pos_emb'] + self.agent_embed[query_info_lst[vid]['agent_id']]
+                    per_query_box = query_info_lst[vid]['box_norm']
+
+                    valid_feat.append(per_query_feat.unsqueeze(0)) # (1, D)
+                    valid_feat_pos.append(per_query_pos.unsqueeze(0)) # (1, D)
+                    norm_bboxes.append(per_query_box.unsqueeze(0)) # (1, 7)
+                valid_feat = torch.cat(valid_feat, dim=0).unsqueeze(0) # (1, M, D)
+                valid_feat_pos = torch.cat(valid_feat_pos, dim=0).unsqueeze(0) # (1, M, D)
+                norm_bboxes = torch.cat(norm_bboxes, dim=0) # (M, 7)
+
+                fused_query = self.fd_atten(valid_feat, valid_feat_pos, attn_mask)
+                # fused_query = valid_feat
+
+                queries = fused_query.squeeze(0) # n_all, 256
+                # print("queries shape is ", queries.shape)
+
+                # ref_bbox = torch.cat(valid_bbox_norm_lst, dim=0)[..., :7] # n_all, 8
+                ref_bbox = norm_bboxes # n_all, 7
+            else:
+                queries = ref_bbox = None
+
+            if len(indep_queries) > 0:
+                indep_boxes = []
+                for indep_query in indep_queries:
+                    indep_box = torch.cat((indep_query['box_norm'], indep_query['confidence']), dim=-1) # (8)
+                    indep_boxes.append(indep_box.unsqueeze(0))
+                indep_boxes = torch.cat(indep_boxes, dim=0) # (indep_num, 8)
+                indep_boxes = indep_boxes.unsqueeze(0) # (1, indep_num, 8)
+            else:
+                indep_boxes = None
+                indep_boxes = torch.zeros(1, 1, 8).to(memory)
+
+            all_queries.append(queries)
+            ref_bboxes.append(ref_bbox)
+            solo_bboxes.append(indep_boxes)
+            
+
+        return result, all_queries, ref_bboxes, solo_bboxes
+
+class TransformerInstanceV2(nn.Module):
+    def __init__(
+        self,
+        d_model=256,
+        nhead=8,
+        nlevel=1,
+        num_encoder_layers=6,
+        num_decoder_layers=6,
+        dim_feedforward=1024,
+        dropout=0.1,
+        activation="relu",
+        num_queries=300,
+        num_classes=1,
+        mom=0.999,
+        cp_flag=False,
+        box_encode_func=None, 
+        box_decode_func=None, 
+        get_sparse_features_func=None,
+    ):
+        super().__init__()
+
+        self.num_queries = num_queries
+        self.num_classes = num_classes
+        self.m = mom
+
+        self.box_encode_func=box_encode_func
+        self.box_decode_func=box_decode_func
+        self.get_sparse_features_func=get_sparse_features_func
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
+        self.encoder = TransformerEncoder(d_model, encoder_layer, num_encoder_layers)
+        # self.trans_adapter = TransAdapt(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
+        # self.query_fusion = SimpleGatingFusion()
+        # self.ref_fusion = BoxGatingFusion()
+        # self.foreground_fusion = MaxFusion()
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, nlevel, dim_feedforward, dropout, activation)
+        self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
+        self.fd_atten = Fusion_Decoder(d_model)
+
+        self.agent_embed = nn.Parameter(torch.Tensor(2, d_model))
+        self.pos_embed_layer = MLP(8, d_model, d_model, 3)
+        self.sample_idx = 0
+        self.iou_rectifier = 0.68
+
+        self.parameters_fix()
+
+    def parameters_fix(self):
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+        for p in self.decoder.parameters():
+            p.requires_grad = False
+
+
+    def _create_ref_windows(self, tensor_list):
+        device = tensor_list[0].device
+
+        ref_windows = []
+        for tensor in tensor_list:
+            B, _, H, W = tensor.shape
+            ref_y, ref_x = torch.meshgrid(
+                torch.linspace(0.5, H - 0.5, H, dtype=torch.float32, device=device),
+                torch.linspace(0.5, W - 0.5, W, dtype=torch.float32, device=device),
+                indexing="ij",
+            )
+
+            ref_y = ref_y.reshape(-1)[None] / H
+            ref_x = ref_x.reshape(-1)[None] / W
+            ref_xy = torch.stack((ref_x, ref_y), -1)
+            ref_wh = torch.ones_like(ref_xy) * 0.025  # 0.01 - 0.05 w.r.t. Deform-DETR
+            placeholder = torch.zeros_like(ref_xy)[..., :1]
+            ref_box = torch.cat((ref_xy, placeholder + 0.5, ref_wh, placeholder + 0.5, placeholder), -1).expand(
+                B, -1, -1
+            )
+
+            ref_windows.append(ref_box)
+        ref_windows = torch.cat(ref_windows, dim=1)
+
+        return ref_windows
+
+    def _get_enc_proposals(self, enc_embed, ref_windows, indexes=None, heatmap=None):
+        B, L = enc_embed.shape[:2]
+        out_logits, out_ref_windows, out_ious = self.proposal_head(enc_embed, ref_windows) # 分类logits(B, H * W, 1)  、boxes 定位 (B, H * W, 7) 、 IoU预测 (B, H * W, 1)
+
+        out_probs = out_logits[..., 0].sigmoid() # (B, HW)
+
+        mask = (out_probs > 0.2).int() # (B, H * W, )  大于阈值的全部置为True
+
+        out_ious = (out_ious + 1) / 2
+        if isinstance(self.iou_rectifier, float): # 大于阈值的部分需要同时考虑IoU得分
+            temp_probs = torch.pow(out_probs, 1 - self.iou_rectifier) * torch.pow(out_ious[..., 0], self.iou_rectifier)
+            out_probs = out_probs * (1 - mask) + mask * temp_probs
+        else:
+            raise TypeError('only list or float')
+
+        topk_probs, indexes = torch.topk(out_probs, self.num_queries, dim=1, sorted=False)
+        topk_probs = topk_probs.unsqueeze(-1)
+        indexes = indexes.unsqueeze(-1)
+
+        out_ref_windows = torch.gather(out_ref_windows, 1, indexes.expand(-1, -1, out_ref_windows.shape[-1]))
+        out_ref_windows = torch.cat(
+            (
+                out_ref_windows.detach(),
+                topk_probs.detach().expand(-1, -1, out_logits.shape[-1]),
+            ),
+            dim=-1,
+        )
+
+        out_pos = None
+        out_embed = None
+
+        return out_embed, out_pos, out_ref_windows, indexes
+
+    # def _get_enc_proposals(self, enc_embed, ref_windows, indexes=None, heatmap=None):
+    #     """
+    #     根据 heatmap 预先筛选 proposals，并从 logits 中选取最终的 queries，返回原始 heatmap 的 HW 索引。
+
+    #     Args:
+    #         enc_embed: 编码的嵌入向量，形状为 [B, L, C]
+    #         ref_windows: 参考窗口，形状为 [B, L, 4]
+    #         indexes: 用于标识某些元素的索引（可选）
+    #         heatmap: 热图，形状为 [B, 1, H, W]
+
+    #     Returns:
+    #         out_embed: 筛选后的嵌入向量（未设置逻辑，返回 None）
+    #         out_pos: 筛选后的位置编码（未设置逻辑，返回 None）
+    #         out_ref_windows: 筛选后的参考窗口
+    #         hw_indexes: 筛选后的原始 heatmap HW 索引
+    #     """
+    #     B, L = enc_embed.shape[:2]
+    #     H, W = heatmap.shape[-2:]
+
+    #     # 通过 proposal_head 获取预测 logits 和参考窗口
+    #     out_logits, out_ref_windows = self.proposal_head(enc_embed, ref_windows)
+
+    #     # Step 1: 从 heatmap 中筛选出高概率区域，并保留 HW 索引
+    #     heatmap_flat = heatmap.view(B, -1)  # [B, H*W]
+    #     top_proposals = heatmap_flat.argsort(dim=-1, descending=True)[..., :self.num_queries * 2]  # 保留 2 倍数量
+    #     hw_indexes = top_proposals  # 保存原始 HW 索引 (B, 2*num_queries)
+
+    #     # 利用 HW 索引从 heatmap_flat 提取概率，筛选 logits 和 ref_windows
+    #     filtered_logits = torch.gather(out_logits, 1, top_proposals.unsqueeze(-1).expand(-1, -1, out_logits.shape[-1]))
+    #     filtered_ref_windows = torch.gather(ref_windows, 1, top_proposals.unsqueeze(-1).expand(-1, -1, ref_windows.shape[-1]))
+
+    #     # Step 2: 在筛选后的 proposals 中，进一步筛选 num_queries 个
+    #     out_probs = filtered_logits[..., 0].sigmoid()
+    #     topk_probs, indexes = torch.topk(out_probs, self.num_queries, dim=1, sorted=False) # (B, num_queries)  both shape
+
+    #     # 获取最终的 HW 索引
+    #     final_hw_indexes = torch.gather(hw_indexes, 1, indexes)  # 从原始 HW 索引中提取最终的 topk
+    #     topk_probs = topk_probs.unsqueeze(-1)  # 增加最后一维
+
+    #     # print("filtered_ref_windows shape is ", filtered_ref_windows.shape)
+    #     # print("indexes shape is ", indexes.shape)
+    #     # 获取参考窗口的最终内容
+    #     out_ref_windows = torch.gather(filtered_ref_windows, 1, indexes.unsqueeze(-1).expand(-1, -1, filtered_ref_windows.shape[-1]))
+    #     out_ref_windows = torch.cat(
+    #         (
+    #             out_ref_windows.detach(),
+    #             topk_probs.detach().expand(-1, -1, filtered_logits.shape[-1]),
+    #         ),
+    #         dim=-1,
+    #     )
+
+    #     # 输出的嵌入和位置信息暂时为 None
+    #     out_pos = None
+    #     out_embed = None
+
+    #     return out_embed, out_pos, out_ref_windows, final_hw_indexes.unsqueeze(-1)
+
+
+    @torch.no_grad()
+    def _momentum_update_gt_decoder(self):
+        """
+        Momentum update of the key encoder
+        """
+        for param_q, param_k in zip(self.decoder.parameters(), self.decoder_gt.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1.0 - self.m)
+
+    def regroup(self, x, record_len):
+        cum_sum_len = torch.cumsum(record_len, dim=0)
+        split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
+        return split_x
+
+    def forward(self, src, pos, noised_gt_box=None, noised_gt_onehot=None, attn_mask=None, targets=None, record_len=None, pairwise_t_matrix=None, pairwise_t_matrix_ref=None, heatmap=None):
+        '''
+        ⚡ 先自车检测， 获得高质量query后传输
+        src: [(B_n, 256, H, W)]
+        pos: [(B_n, 256, H, W)]
+        noised_gt_box: (B_n, pad_size, 7)  这里用的应该是single gt 因为这个要先refine单车 形成优质query
+        noised_gt_onehot: (B_n, pad_size, num_classes)
+        attn_mask: (1000+pad_size, 1000+pad_size)
+        targets: [{'gt_boxes': (N, 7), 'labels': (N, )}, ...]
+        '''
+        assert pos is not None, "position encoding is required!"
+        src_anchors = self._create_ref_windows(src) # 创造参考框，这个是BoxAttention必须的 (B_n, HW, 7)
+        src, _, src_shape = flatten_with_shape(src, None)# 展平特征图，返回的是 (B_n, H*W, 256), None, (1, 2) 最后一项记录着H，W 即feature shape
+        src_pos = []
+        for pe in pos:
+            B, C = pe.shape[:2]
+            pe = pe.view(B, C, -1).transpose(1, 2) # b, h*w, c
+            src_pos.append(pe)
+        src_pos = torch.cat(src_pos, dim=1) # (B_n, H*W, C)
+        src_start_index = torch.cat([src_shape.new_zeros(1), src_shape.prod(1).cumsum(0)[:-1]]) # 这是为了生成划分的索引，区分每个特征图的位置，由于只有一个特征图，所以结果是(0,)
+
+        memory = self.encoder(src, src_pos, src_shape, src_start_index, src_anchors) # BoxAttention 提取特征 结果为(B_n, H*W, 256)
+        query_embed, query_pos, topk_proposals, topk_indexes = self._get_enc_proposals(memory, src_anchors, heatmap=heatmap) # 返回None，None，(B_n, query_num, 8)，(B_n, query_num, 1)
+        
+        pad_size = 0
+        # 加噪声gt，准备一起参与decoder训练去噪
+        if noised_gt_box is not None:
+            noised_gt_proposals = torch.cat(
+                (
+                    noised_gt_box,
+                    noised_gt_onehot,
+                ),
+                dim=-1,
+            ) # (B_n, pad_size, 8)
+            pad_size = noised_gt_proposals.size(1)
+            topk_proposals = torch.cat(
+                (
+                    noised_gt_proposals,
+                    topk_proposals,
+                ),
+                dim=1,
+            ) # (B_n, pad_size + query_num, 8) 
+        init_reference_out = topk_proposals[..., :7]
+
+        # hs, inter_references = self.decoder_gt(
+        hs, inter_references, bboxes_per_layer = self.decoder(
+            query_embed, # None 
+            query_pos, # None
+            memory, # BoxAttention 提取特征后结合多agent后的Feature Map 结果为(B_n, H*W, 256)
+            src_shape, # (1, 2)
+            src_start_index, # (0,)
+            topk_proposals, # (B, query_num, 8)
+            attn_mask,
+            return_bboxes=True
+        ) # (3, B_n, pad_size + query_num, 256) 每一层的输出的query特征， (3， B_n, pad_size + all_query_num, 7) 每一层的检测结果 
+
+        # optional gt forward 对比学习需要用到的动量更新模型用加噪gt来做对比学习的
+        if targets is not None:
+            batch_size = len(targets) # 这里是single 标签
+            per_gt_num = [tgt["gt_boxes"].shape[0] for tgt in targets] # [N1, N2, N3, N4] 此为B=4时的各个样本的GT数
+            max_gt_num = max(per_gt_num)
+            batched_gt_boxes_with_score = memory.new_zeros(batch_size, max_gt_num, 8) # (B, max_gt_num, 8)
+            for bi in range(batch_size):
+                batched_gt_boxes_with_score[bi, : per_gt_num[bi], :7] = targets[bi]["gt_boxes"] # 放入gt的box 和 one-hot 分类编码
+                batched_gt_boxes_with_score[bi, : per_gt_num[bi], 7:] = F.one_hot(
+                    targets[bi]["labels"], num_classes=self.num_classes
+                )
+
+            with torch.no_grad():
+                self._momentum_update_gt_decoder() # 动量更新辅助模型，其参数更新速度非常缓慢，但一直追随decoder
+                if noised_gt_box is not None:
+                    dn_group_num = noised_gt_proposals.shape[1] // (max_gt_num * 2) # 得到去噪gt组数 == 3  2指的是每一组又分正负样本
+                    pos_idxs = list(range(0, dn_group_num * 2, 2))
+                    pos_noised_gt_proposals = torch.cat(
+                        [noised_gt_proposals[:, pi * max_gt_num : (pi + 1) * max_gt_num] for pi in pos_idxs],
+                        dim=1,
+                    ) # 每一组抽取max_gt_num个 (B_n, 3*max_gt_num, 8) 这是相当于去噪正样本抽取出来
+                    gt_proposals = torch.cat((batched_gt_boxes_with_score, pos_noised_gt_proposals), dim=1)
+                    # create attn_mask for gt groups
+                    gt_attn_mask = memory.new_ones(
+                        (dn_group_num + 1) * max_gt_num, (dn_group_num + 1) * max_gt_num
+                    ).bool()  # （4*max_gt_num，4*max_gt_num）全True
+                    for di in range(dn_group_num + 1): # 对角部分mask 全部设置为False，相当于说只关注自己，即每一批gt，无论有无噪声，仅关注自身，屏蔽组之间的可见性
+                        gt_attn_mask[
+                            di * max_gt_num : (di + 1) * max_gt_num,
+                            di * max_gt_num : (di + 1) * max_gt_num,
+                        ] = False
+                else:
+                    gt_proposals = batched_gt_boxes_with_score
+                    gt_attn_mask = None
+
+                hs_gt, inter_references_gt = self.decoder_gt( # 辅助模型进行对比学习，缓慢追随decoder。 返回 (3，B_n, 4*max_gt_num, 256) 与 (3，B_n, 4*max_gt_num, 8)
+                    None,
+                    None,
+                    memory, # BoxAttention 提取特征后结合多agent后的Feature Map 结果为(B_n, H*W, 256)
+                    src_shape, # (1, 2)
+                    src_start_index, # (0,)
+                    gt_proposals, # (B_n, 4*max_gt_num, 8)
+                    gt_attn_mask, #（4*max_gt_num，4*max_gt_num）
+                )
+
+            init_reference_out = torch.cat(
+                (
+                    init_reference_out,
+                    gt_proposals[..., :7],
+                ),
+                dim=1,
+            ) # (B_n, pad_size + query_num + 4*max_gt_num, 7)  输入decoder前的ref window
+
+            hs = torch.cat(
+                (
+                    hs,
+                    hs_gt,
+                ),
+                dim=2,
+            ) # (3, B_n, pad_size + query_num + 4*max_gt_num, 256) 每一层Decoder layer的输出query
+            inter_references = torch.cat(
+                (
+                    inter_references,
+                    inter_references_gt,
+                ),
+                dim=2,
+            ) # (3，B_n, pad_size + query_num + 4*max_gt_num, 7) 每一层Decoder layer的对应检测结果
+
+        inter_references_out = inter_references
+        '''
+        从前往后依次返回: Decoder layer每一层的query, 输入Decoder的参考框, Decoder layer每一层的检测结果, Encoder输出的特征图, 初始化的参考框, ego的最高query_num的索引
+        TODO Encoder输出的特征图信息会不会不足? 要不要考虑将query融合后的信息放回去 🌟Updated: Done, 先看看性能
+        '''
+        result = {
+            'hs':hs, # (3, B_n, pad_size + query_num + 4*max_gt_num, 256) 每一层Decoder layer的输出query
+            'init_reference_out': init_reference_out,  # (B_n, pad_size + query_num + 4*max_gt_num, 8)  输入decoder前的ref window
+            'inter_references_out': inter_references_out,  # (3，B_n, pad_size + query_num + 4*max_gt_num, 7) 每一层Decoder layer的对应检测结果
+            'memory': memory, # 包括此项的以下三项都是用来监督encoder时才会用到的
+            'src_anchors': src_anchors,
+            'topk_indexes': topk_indexes, # (B_n, query_num, 1) 索引
+        }
+
+        fined_query = hs[-1, :, pad_size:pad_size+self.num_queries,:] # (B_n, query_num, 256) 最后一层Decoder layer的输出query
+        H, W = src_shape[0,0], src_shape[0,1]
+
+        bboxes_per_layer = bboxes_per_layer[-1, :, pad_size:pad_size+self.num_queries, :] # (B_n, query_num, 8)
+
+        memory_discrete = torch.zeros_like(memory) # (B_n, H*W, 256) 
+
+        memory_discrete = memory_discrete.scatter(1, topk_indexes.repeat(1, 1, memory_discrete.size(-1)), fined_query) # (B_n, H*W, 256) 将query放入到一个空的memory中
+        memory_discrete = memory_discrete.permute(0, 2, 1).reshape(memory.shape[0], memory.shape[-1], H, W) # (B_n, C, H, W) 形成稀疏的特征图
+
+        # 新建一个默认参考框，然后将decoder最后一次预测的内容填充进去，这个将会在空间变换后作为分组依据
+        boxes_before_trans = copy.deepcopy(src_anchors) # (B_n, HW, 7)
+        probs_before_trans = torch.zeros(boxes_before_trans.size(0), boxes_before_trans.size(1), 2).to(boxes_before_trans)
+        boxes_before_trans = torch.cat([boxes_before_trans, probs_before_trans], dim=-1) # (B_n, HW, 9)
+        boxes_before_trans = boxes_before_trans.scatter(1, topk_indexes.repeat(1, 1, boxes_before_trans.size(-1)), bboxes_per_layer) # (B_n, H*W, 8) 将bbox放入到一个空的特征图中
+        boxes_before_trans = boxes_before_trans.permute(0, 2, 1).reshape(memory.shape[0], 9, H, W) # (B_n, 9, H, W) 形成稀疏的特征图
+
+        # 创造mask标记fined query
+        valid_flag = torch.ones(fined_query.shape[0], fined_query.shape[1], 1).to(fined_query) # (B_n, query_num, 1) 全1
+        memory_mask = torch.zeros(memory.shape[0], memory.shape[1], 1).to(memory) # (B_n, HW, 1)
+        memory_mask = memory_mask.scatter(1, topk_indexes.repeat(1, 1, memory_mask.size(-1)), valid_flag) # (B_n, HW, 1)  将fined query给标记
+        memory_mask = memory_mask.permute(0, 2, 1).reshape(memory_mask.shape[0], 1, H, W) # (B_n, 1, H, W)
+
+        """ # 所有single先卡置信度阈值, 得到筛选后的结果 因此需要返回一个索引 能从query_num中索引出筛选后的query
+        # filter_bbox: [(n1,8), (n2,8) ...],  filter_indice: [(n1,), (n2,)...] 筛选对应的索引
+        filter_bbox, filter_indice = self.get_bboxes(bboxes_per_layer)
+
+        memory_discrete = []
+        valid_flag = torch.ones(1, fined_query.shape[1], 1).to(fined_query) # (1, query_num, 1) 全1
+        memory_mask = []
+        select_bbox = []
+        for bn_i in range(len(memory_discrete)): # 
+            memory_discrete_bn_i = torch.zeros(1, memory.shape[-2], memory.shape[-1]).to(memory) # (1, H*W, 256) 
+            memory_mask_bn_i = torch.zeros(1, memory.shape[1], 1).to(memory) # (1, HW, 1)
+            bbox_bn_i = memory_discrete_bn_i.new_zeros(1, memory.shape[-2], 8) # (1, HW, 8)
+
+            filter_indice_bn_i = filter_indice[bn_i].unsqueeze(-1) # (n, 1) 针对query_num 的索引
+            filter_bbox_bn_i = filter_bbox[bn_i].unsqueeze(0) # (1, n, 8)
+
+            select_indexes_bn_i = torch.gather(topk_indexes[bn_i], 0, filter_indice_bn_i.expand(-1, 1)) # 从(query_num, 1)的query中取出筛选出来的那部分 (n, 1) 这就是全局索引了
+            select_indexes_bn_i = select_indexes_bn_i.unsqueeze(0) # (1, n, 1)
+            fined_query_bn_i = torch.gather(fined_query[bn_i], 0, filter_indice_bn_i.expand(-1, fined_query[bn_i].shape[-1])) # (query_num, 256) 中选出 n, 256
+
+            bbox_bn_i = bbox_bn_i.scatter(1, select_indexes_bn_i.repeat(1, 1, bbox_bn_i.size(-1)), filter_bbox_bn_i) # 将(1, n, 8) 放入到 （1， HW， 8）
+            bbox_bn_i = bbox_bn_i.permute(0, 2, 1).reshape(1, bbox_bn_i.shape[-1], H, W) # (1, 8, H, W) 形成稀疏的特征图
+
+            memory_discrete_bn_i = memory_discrete_bn_i.scatter(1, select_indexes_bn_i.repeat(1, 1, memory_discrete_bn_i.size(-1)), fined_query_bn_i.unsqueeze(0)) 
+            memory_discrete_bn_i = memory_discrete_bn_i.permute(0, 2, 1).reshape(1, memory.shape[-1], H, W) # (1, C, H, W) 形成稀疏的特征图
+
+            memory_mask_bn_i = memory_mask_bn_i.scatter(1, select_indexes_bn_i.repeat(1, 1, memory_mask_bn_i.size(-1)), valid_flag) # (1, HW, 1)  将fined query给标记
+            memory_mask_bn_i = memory_mask_bn_i.permute(0, 2, 1).reshape(memory_mask_bn_i.shape[0], 1, H, W) # (1, 1, H, W)
+
+            select_bbox.append(bbox_bn_i)
+            memory_discrete.append(memory_discrete_bn_i)
+            memory_mask.append(memory_mask_bn_i) 
+
+        select_bbox = torch.cat(select_bbox, dim=0) # (B_n, 8, H, W) 筛选后的高质量query对应的bbox
+        memory_discrete = torch.cat(memory_discrete, dim=0) # (B_n, C, H, W) 筛选后的高质量query已经放入这个memory中
+        memory_mask = torch.cat(memory_mask, dim=0) # (B_n, 1, H, W) 被放入的位置标记为1 """
+
+        # 到这里，准备了 1️⃣离散特征图 2️⃣ 离散特征图对应的mask，用来索引和标记 3️⃣ 筛选出来的对应bbox
+        memory_discrete_batch_lst = self.regroup(memory_discrete, record_len)
+        memory_mask_batch_lst = self.regroup(memory_mask, record_len)
+        boxes_before_trans_batch_lst = self.regroup(boxes_before_trans, record_len)
+
+        # memory_batch_lst = self.regroup(memory, record_len)
+        all_queries = []
+        ref_bboxes = []
+        solo_bboxes = []
         for bid in range(len(record_len)):
             N = record_len[bid] # number of valid agent
             t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
@@ -2846,8 +3435,8 @@ class TransformerInstanceV1(nn.Module):
                 n_q = valid_query_lst[i].size(0)
                 agent_queries = valid_query_lst[i] # (n, 8)
                 # agent_bboxes = valid_bbox_lst[i] # (n, 8)
-                agent_bboxes_norm = valid_bbox_norm_lst[i] # (n,8)
-                agent_pos_emb = self.pos_embed_layer(agent_bboxes_norm)
+                agent_bboxes_norm = valid_bbox_norm_lst[i] # (n,9)
+                agent_pos_emb = self.pos_embed_layer(agent_bboxes_norm[..., :8])
                 
                 valid_mask  = neighbor_mask[i] # (HW,)
                 valid_i = i_indices[i][valid_mask == 1] # 所有有效位置的 i 坐标 (n, )
@@ -2864,7 +3453,8 @@ class TransformerInstanceV1(nn.Module):
                         "bbox_size": agent_bboxes_norm[j][3:5], # (2) l, w
                         # "heading": agent_bboxes[j][6:7],
                         "2d_pos": valid_2d_pos[j], # (2,) 2d坐标
-                        "confidence": agent_bboxes_norm[j][7:],
+                        "confidence": agent_bboxes_norm[j][7:8],
+                        "iou_score": agent_bboxes_norm[j][8:],
                         "pos_emb": agent_pos_emb[j], # 256
                         "feature": agent_queries[j]
                     }
@@ -2900,16 +3490,16 @@ class TransformerInstanceV1(nn.Module):
             else:
                 queries = ref_bbox = None
 
-            if len(indep_queries) > 0:
+            if len(indep_queries) > 0: # 没有意味着所有的query都最起码有一个重叠
                 indep_boxes = []
                 for indep_query in indep_queries:
-                    indep_box = torch.cat((indep_query['box_norm'], indep_query['confidence']), dim=-1) # (8)
+                    indep_box = torch.cat((indep_query['box_norm'], indep_query['confidence'], indep_query['iou_score']), dim=-1) # (9)
                     indep_boxes.append(indep_box.unsqueeze(0))
-                indep_boxes = torch.cat(indep_boxes, dim=0) # (indep_num, 8)
-                indep_boxes = indep_boxes.unsqueeze(0) # (1, indep_num, 8)
+                indep_boxes = torch.cat(indep_boxes, dim=0) # (indep_num, 9)
+                indep_boxes = indep_boxes.unsqueeze(0) # (1, indep_num, 9)
             else:
                 indep_boxes = None
-                indep_boxes = torch.zeros(1, 1, 8).to(memory)
+                indep_boxes = torch.zeros(1, 1, 9).to(memory)
 
             all_queries.append(queries)
             ref_bboxes.append(ref_bbox)
@@ -2917,6 +3507,7 @@ class TransformerInstanceV1(nn.Module):
             
 
         return result, all_queries, ref_bboxes, solo_bboxes
+
 
 def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.10, decode_box_func = None):
 
