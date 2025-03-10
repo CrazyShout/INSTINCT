@@ -461,7 +461,9 @@ def getIntermediatev2augFusionDataset(cls):
             transformation_matrix_clean = \
                 x1_to_x2(selected_cav_base['params']['lidar_pose_clean'],
                         ego_pose_clean)
-            cav_bbx_center, cav_bbx_mask, cav_ids = self.generate_object_center([selected_cav_base], ego_pose_clean)
+            
+            cav_bbx_center, cav_bbx_mask, cav_ids = cooperative_bbx_center, cooperative_bbx_mask, None
+            # cav_bbx_center, cav_bbx_mask, cav_ids = self.generate_object_center([selected_cav_base], ego_pose_clean)
             # # TODO 以下是针对DairV2X特异化处理的，因为协同标签只加载在车端，但是路端也需要处理，注意，这个后面要回退，因为在推理时生成GT会用两者标签并集去重，协同标签确实只用加载在车端
             # selected_inf_base['params']['vehicles_all'] = selected_cav_base['params']['vehicles_all'] # 这里必须要把协同标签拿过来，因为在Dair中只有车端有协同标签
 
@@ -632,43 +634,6 @@ def getIntermediatev2augFusionDataset(cls):
                 )
 
             return selected_cav_processed
-
-        def get_single_gt_labels(self, selected_cav_base, ego_cav_base, sampled_boxes_cav, lidar_np_cav, random_seed):
-            selected_cav_processed = {}
-
-            ego_pose, ego_pose_clean = ego_cav_base['params']['lidar_pose'], ego_cav_base['params']['lidar_pose_clean']
-
-            transformation_matrix_inv = x1_to_x2(ego_pose, selected_cav_base['params']['lidar_pose']) 
-            '''
-            interesting! 所有的agent的点云都投影到ego坐标系中, 然后进行gt sampling和augment 随后投影回去作为作为感知输入
-            在体素预处理中, 会根据lidar的范围剔除特征图范围外的点, 然而对于单车监督 还需要将其单车标签也更新
-            '''
-            # generate targets label single GT, note the reference pose is itself.
-            cav_bbx_center, cav_bbx_mask, _ = self.generate_object_center_single(
-                [selected_cav_base], selected_cav_base['params']['lidar_pose']
-            )
-            if self.fade is False:
-                # 做数据增强的原因是存在翻转、旋转以及缩放，这些是在协同标签以及点云上做了的，所以要把单车标签也操作一下，这只针对single 标签，因此点云随意传入即可，返回也用不到
-                _, cav_bbx_center, cav_bbx_mask = self.augment(lidar_np_cav, cav_bbx_center, cav_bbx_mask, random_seed, choice=1,
-                                                                                            flip=selected_cav_base['flip'],
-                                                                                            rotation=selected_cav_base['noise_rotation'],
-                                                                                            scale=selected_cav_base['noise_scale']) #choice=1 skip gt_sampling
-
-                # 车端single只需要将多出来的gt拼起来即可
-                gt_boxes_valid = cav_bbx_center[cav_bbx_mask == 1]
-                if sampled_boxes_cav.shape[0] > 0:
-                    sampled_boxes_corner_cav = box_utils.boxes_to_corners_3d(sampled_boxes_cav, 'lwh')
-                    projected_sampled_boxes_corner_cav = box_utils.project_box3d(sampled_boxes_corner_cav, transformation_matrix_inv)
-                    projected_sampled_boxes_corner_cav = box_utils.mask_boxes_outside_range_numpy(projected_sampled_boxes_corner_cav, self.params['postprocess']['gt_range'], order='lwh')
-                    # projected_sampled_boxes_corner_inf = projected_sampled_boxes_corner_inf[mask, :, :]
-                    sampled_boxes_cav = box_utils.corners_to_boxes_3d(projected_sampled_boxes_corner_cav, 'lwh') # (extra_num, 7)
-                gt_boxes_valid = np.concatenate([gt_boxes_valid, sampled_boxes_cav], axis=0)
-                cav_bbx_center[:gt_boxes_valid.shape[0], :] = gt_boxes_valid
-                cav_bbx_mask[:gt_boxes_valid.shape[0]] = 1
-
-            selected_cav_processed.update({
-                                "single_object_bbx_center": cav_bbx_center,
-                                "single_object_bbx_mask": cav_bbx_mask})
 
         def get_item_all_agent(self, selected_cav_base, selected_inf_base, ego_cav_base):
             """
@@ -1140,7 +1105,7 @@ def getIntermediatev2augFusionDataset(cls):
                 [object_id_stack.index(x) for x in set(object_id_stack)]
             object_stack = np.vstack(object_stack)
             object_stack = object_stack[unique_indices]
-
+            # print("object_id_stack is ", object_id_stack)
             # make sure bounding boxes across all frames have the same number
             object_bbx_center = \
                 np.zeros((self.params['postprocess']['max_num'], 7))
@@ -1151,9 +1116,9 @@ def getIntermediatev2augFusionDataset(cls):
             # 不同于dairv2x数据集将协同标签记录在车端，其他很多数据集都是将自车标签去重合并后得到的标签
             if self.dataset_name != "dairv2x":
                 # print("len(cav_id_list) is ", len(cav_id_list))
-                for i, cav_id in enumerate(cav_id_list):
+                for cnt, cav_id in enumerate(cav_id_list):
                     gt_sampling_keep_same = True
-                    if i == len(cav_id_list)-1: # 这是让同一个场景下的gt采样一致，最后一个agent要负责将gt采样设置更新，从而让下一个场景可以重新采样
+                    if cnt == len(cav_id_list)-1: # 这是让同一个场景下的gt采样一致，最后一个agent要负责将gt采样设置更新，从而让下一个场景可以重新采样
                         gt_sampling_keep_same = False
                     selected_cav_base = base_data_dict[cav_id]
                     selected_cav_base['flip'] = flip
@@ -1161,7 +1126,10 @@ def getIntermediatev2augFusionDataset(cls):
                     selected_cav_base['noise_scale'] = noise_scale
                     cooperative_bbx_center = copy.deepcopy(object_bbx_center)
                     cooperative_bbx_mask = copy.deepcopy(mask)
-                    selected_cav_processed = self.get_item_single_common(selected_cav_base, ego_cav_base, cooperative_bbx_center=cooperative_bbx_center, cooperative_bbx_mask=cooperative_bbx_mask, stay_static=gt_sampling_keep_same)
+                    selected_cav_processed = self.get_item_single_common(selected_cav_base, ego_cav_base, 
+                                                                         cooperative_bbx_center=cooperative_bbx_center, 
+                                                                         cooperative_bbx_mask=cooperative_bbx_mask, 
+                                                                         stay_static=gt_sampling_keep_same)
                     # print("selected_cav_processed['object_bbx_center']  is ", selected_cav_processed['object_bbx_center'])
                     # object_stack.append(selected_cav_processed['object_bbx_center'])
                     # object_id_stack += selected_cav_processed['object_ids']
@@ -1207,29 +1175,6 @@ def getIntermediatev2augFusionDataset(cls):
                     processed_data_dict['ego'].update({'teacher_processed_lidar':
                     stack_feature_processed})
 
-                # random_seed = np.random.randint(100000) #for same random augmentation
-                
-                # lidar_np_pad = base_data_dict[0]['lidar_np'] # 随意找的一个点云 因为我们只需要得到gt sampling的boxes
-                # # 这里做一次数据增强，为了得到采样的框，
-                # lidar_np_cav, cav_bbx_center, cav_bbx_mask, sampled_boxes_cav = self.augment(lidar_np_pad, object_bbx_center, mask, random_seed, stay_static=False, return_sampled_boxes=True,
-                #                                                                             flip=flip,
-                #                                                                             rotation=noise_rotation,
-                #                                                                             scale=noise_scale) #choice=1 skip gt_sampling
-                # for i, cav_id in enumerate(cav_id_list):
-                #     selected_cav_base = base_data_dict[cav_id]
-                #     selected_cav_processed = self.get_single_gt_labels(selected_cav_base, ego_cav_base, sampled_boxes_cav, lidar_np_pad, random_seed)
-                #     if self.supervise_single:
-                #         single_object_bbx_center_list.append(selected_cav_processed['single_object_bbx_center'])
-                #         single_object_bbx_mask_list.append(selected_cav_processed['single_object_bbx_mask'])
-                # # generate single view GT label
-                # if self.supervise_single:
-                #     single_object_bbx_center = torch.from_numpy(np.array(single_object_bbx_center_list))
-                #     single_object_bbx_mask = torch.from_numpy(np.array(single_object_bbx_mask_list))
-                #     processed_data_dict['ego'].update({
-                #         "single_object_bbx_center_torch": single_object_bbx_center,
-                #         "single_object_bbx_mask_torch": single_object_bbx_mask,
-                #         })
-                    
             if self.load_lidar_file:
                 merged_feature_dict = merge_features_to_dict(processed_features)
                 processed_data_dict['ego'].update({'processed_lidar': merged_feature_dict})
@@ -1256,12 +1201,17 @@ def getIntermediatev2augFusionDataset(cls):
                 'lidar_poses_clean': lidar_poses_clean,
                 'lidar_poses': lidar_poses})
 
-
+            # print("object_bbx_center[object_bbx_mask == 1].shape is ", object_bbx_center[mask == 1].shape)
+            # print("processed_data_dict['ego']['object_ids'] is ", processed_data_dict['ego']['object_ids'])
             if self.visualize:
                 processed_data_dict['ego'].update({'origin_lidar':
                     np.vstack(
                         projected_lidar_stack)})
-
+                split_num = []
+                for pd in projected_lidar_stack:
+                    split_num.append(pd.shape[0])
+                processed_data_dict['ego'].update({'origin_lidar_splitnum':
+                    split_num}) # [n1, n2, ...]
 
             processed_data_dict['ego'].update({'sample_idx': idx,
                                                 'cav_id_list': cav_id_list})
@@ -1283,6 +1233,7 @@ def getIntermediatev2augFusionDataset(cls):
             label_dict_list = []
             lidar_pose_list = []
             origin_lidar = []
+            origin_lidar_splitnum = []
             lidar_pose_clean_list = []
 
             # pairwise transformation matrix
@@ -1317,6 +1268,7 @@ def getIntermediatev2augFusionDataset(cls):
 
                 if self.visualize:
                     origin_lidar.append(ego_dict['origin_lidar'])
+                    origin_lidar_splitnum.append(ego_dict['origin_lidar_splitnum'])
 
                 if self.kd_flag:
                     teacher_processed_lidar_list.append(ego_dict['teacher_processed_lidar'])
@@ -1376,10 +1328,14 @@ def getIntermediatev2augFusionDataset(cls):
 
 
             if self.visualize:
+                # origin_lidar = \
+                #     np.array(downsample_lidar_minimum(pcd_np_list=origin_lidar))
                 origin_lidar = \
-                    np.array(downsample_lidar_minimum(pcd_np_list=origin_lidar))
+                    np.array(origin_lidar) # 不要打乱，否则将无法分别可视化每个agent的点云 2024年8月16日 xyj
                 origin_lidar = torch.from_numpy(origin_lidar)
                 output_dict['ego'].update({'origin_lidar': origin_lidar})
+                output_dict['ego'].update({'origin_lidar_splitnum': origin_lidar_splitnum})
+
 
             if self.kd_flag:
                 teacher_processed_lidar_torch_dict = \

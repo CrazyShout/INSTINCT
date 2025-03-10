@@ -1,12 +1,12 @@
-name: dairv2x_point_pillar_lidar_disconet_withnoise
-data_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure"
-root_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
-validate_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
-test_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+name: dairv2x_point_pillar_lidar_disconet_wo_noise
+data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
+root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
+validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+test_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
 
 
 noise_setting:
-  add_noise: True
+  add_noise: False
   args: 
     pos_std: 0.2
     rot_std: 0.2
@@ -16,10 +16,10 @@ noise_setting:
 yaml_parser: "load_point_pillar_params"
 train_params:
   batch_size: &batch_size 8
-  epoches: 40
+  epoches: 60
   eval_freq: 1
   save_freq: 1
-  max_cav: &max_cav 5
+  max_cav: &max_cav 2
 
 input_source: ['lidar']
 label_type: 'lidar'
@@ -113,7 +113,7 @@ model:
 kd_flag:
   teacher_model: point_pillar_disconet_teacher
   teacher_model_config: *model_args
-  teacher_path: "opencood/logs/dairv2x_point_pillar_lidar_early_2023_02_09_10_00_04/net_epoch_bestval_at27.pth"
+  teacher_path: "/public/home/lilingzhi/xyj/CoAlign/opencood/logs/dairv2x/dairv2x_point_pillar_lidar_early_2025_02_17_12_40_53/net_epoch_bestval_at55.pth"
     
 
 loss:

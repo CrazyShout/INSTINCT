@@ -2408,7 +2408,7 @@ class TransformerInstanceV1(nn.Module):
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
         self.fd_atten = Fusion_Decoder(d_model)
 
-        self.agent_embed = nn.Parameter(torch.Tensor(5, d_model))
+        self.agent_embed = nn.Parameter(torch.Tensor(2, d_model))
         self.pos_embed_layer = MLP(8, d_model, d_model, 3)
         self.sample_idx = 0
         self.parameters_fix()
@@ -2752,6 +2752,7 @@ class TransformerInstanceV1(nn.Module):
         # print("record_len is ", record_len)
         # print("memory_discrete shape is ", memory_discrete.shape)
         # print("pairwise_t_matrix shape is ", pairwise_t_matrix.shape)
+        com_num_batch = []
         for bid in range(len(record_len)):
             N = record_len[bid] # number of valid agent
             t_matrix = pairwise_t_matrix[bid][:N, :N, :, :] # (N, N, 2, 3)
@@ -2775,49 +2776,75 @@ class TransformerInstanceV1(nn.Module):
             neighbor_memory_mask = warp_affine_simple(memory_mask_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 1, H, W)
             neighbor_select_bbox_b = warp_affine_simple(select_bbox_b, t_matrix[0, :, :, :], (H, W), mode='nearest') # (N, 8, H，W) 
 
-            # import matplotlib.pyplot as plt
-            # import os
-            # if self.sample_idx % 20 == 0:
-            #     save_dir = "./feature_vis_gaussian"
-            #     os.makedirs(save_dir, exist_ok=True)
-            #     for b in range(N):
-            #         confidence = neighbor_select_bbox_b[b, 7, :, :] # (H, W)
-            #         mask = (confidence > 0.1).float()
-            #         # mask = mask.unsqueeze(1)
-            #         feature_map = neighbor_memory[b]
-            #         feature_map = feature_map.mean(dim=0)
-            #         feature_mask = neighbor_memory_mask[b]
-            #         feature_mask = mask
+            """ import matplotlib.pyplot as plt
+            # from matplotlib.cm import ScalarMappable
+            from sklearn.preprocessing import MinMaxScaler
+            from scipy.ndimage import gaussian_filter1d
+            from matplotlib.colors import LogNorm, SymLogNorm
+            import os
+            if self.sample_idx % 20 == 0:
+                save_dir = "./feature_vis_final"
+                os.makedirs(save_dir, exist_ok=True)
+                # 先收集所有feature_map的全局最大最小值
+                feature_maps = []
+                for b in range(N):
+                    feature_map = neighbor_memory[b].mean(dim=0)  # (H, W)
+                    feature_maps.append(feature_map)
+                # 计算全局最小值和最大值
+                global_min = min([fm.min() for fm in feature_maps])
+                global_max = max([fm.max() for fm in feature_maps])
+                for b in range(N): # 遍历一个场景中的所有agent
+                    confidence = neighbor_select_bbox_b[b, 7, :, :] # (H, W)
+                    mask = (confidence > 0.1).float()
+                    # mask = mask.unsqueeze(1)
+                    feature_map = neighbor_memory[b] # (C, H, W)
+                    feature_map = feature_map.mean(dim=0) # (H, W)
+                    feature_map[feature_map<0]=0
+                    feature_mask = neighbor_memory_mask[b] # (1, H, W)
+                    feature_mask = mask
 
-            #         # 将特征图归一化到 [0, 255]
-            #         def normalize_to_image(tensor):
-            #             tensor = tensor - tensor.min()
-            #             tensor = tensor / tensor.max()
-            #             return (tensor * 255).byte()
+                    feature_filtered = copy.deepcopy(feature_map)
+                    feature_filtered[feature_mask != 1] = feature_filtered.min()
+                    # 将特征图归一化到 [0, 255]
+                    def normalize_to_image(tensor):
+                        tensor = tensor - tensor.min()
+                        tensor = tensor / tensor.max()
+                        return (tensor * 255).byte()
                     
-            #         dense_feature = normalize_to_image(feature_map)
-            #         feature_mask = normalize_to_image(feature_mask)
-            #         # 转为 NumPy 格式
-            #         dense_feature_np = dense_feature.cpu().numpy()
-            #         feature_mask_np = feature_mask.cpu().numpy()
+                    dense_feature = normalize_to_image(feature_map)
+                    feature_mask = normalize_to_image(feature_mask)
+                    feature_filtered = normalize_to_image(feature_filtered)
+                    # 转为 NumPy 格式
+                    dense_feature_np = dense_feature.cpu().numpy()
+                    feature_mask_np = feature_mask.cpu().numpy()
+                    feature_filtered_np = feature_filtered.cpu().numpy()
 
-            #         # 创建可视化画布
-            #         fig, axes = plt.subplots(1, 2, figsize=(20, 10))
-            #         axes[0].imshow(dense_feature_np, cmap="viridis")
-            #         axes[0].set_title("Dense Feature")
-            #         axes[0].axis("off")
-            #         axes[1].imshow(feature_mask_np, cmap="viridis")
-            #         axes[1].set_title("Sparse Mask")
-            #         axes[1].axis("off")
+                    # 创建可视化画布
+                    plt.figure(figsize=(10, 10))  # 调整尺寸为单个图
+                    plt.imshow(dense_feature_np, cmap="viridis")
+                    plt.title("Dense Feature")
+                    plt.axis("off")
+                    plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}_dense.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+                    plt.close()  # 关闭当前图
 
-            #         # plt.figure(figsize=(20, 10))
-            #         # plt.imshow(dense_feature_np, cmap="viridis")
-            #         # plt.axis("off")
+                    plt.figure(figsize=(10, 10))  # 调整尺寸为单个图
+                    plt.imshow(feature_filtered_np, cmap="viridis")
+                    plt.title("Dense Feature")
+                    plt.axis("off")
+                    plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}_filtered.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+                    plt.close()  # 关闭当前图
+                    # fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+                    # axes[0].imshow(dense_feature_np, cmap="viridis")
+                    # axes[0].set_title("Dense Feature")
+                    # axes[0].axis("off")
+                    # axes[1].imshow(feature_mask_np, cmap="viridis")
+                    # axes[1].set_title("Sparse Mask")
+                    # axes[1].axis("off")
 
-            #         # 保存到文件
-            #         plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
-            #         plt.close() 
-            # self.sample_idx += 1
+                    # # 保存到文件
+                    # plt.savefig(os.path.join(save_dir, f"trans_feature_map_{self.sample_idx}_{b}.png"), dpi=300, bbox_inches="tight", pad_inches=0)
+                    # plt.close() 
+            # self.sample_idx += 1 """
             
             neighbor_memory = neighbor_memory.flatten(2).permute(0, 2, 1) # (N, HW, C)
             neighbor_memory_mask = neighbor_memory_mask.flatten(2).permute(0, 2, 1) # (N, HW, 1) 这个里面有0有1, 1的地方就是对应其有效的query
@@ -2861,6 +2888,7 @@ class TransformerInstanceV1(nn.Module):
             # valid_j = j_indices[neighbor_mask == 1]  # 所有有效位置的 j 坐标
 
             query_info_lst = []
+            com_num = 0
             for i in range(len(valid_query_lst)): # 遍历每个agent
                 n_q = valid_query_lst[i].size(0)
                 agent_queries = valid_query_lst[i] # (n, 8)
@@ -2887,7 +2915,20 @@ class TransformerInstanceV1(nn.Module):
                         "pos_emb": agent_pos_emb[j], # 256
                         "feature": agent_queries[j]
                     }
+                    # if i > 0: # 消融实验
+                    #     if agent_bboxes_norm[j][7:] > 0.1:
+                    #         query_info_lst.append(query_info)
+                    # else:
                     query_info_lst.append(query_info)
+
+                    # 计算通信量 也就是传输的query 个数
+                    if i > 0:
+                        if agent_bboxes_norm[j][7:] > 0.1:
+                            com_num += 1
+            extra_agents_num = max(1, N-1)
+            com_num /= extra_agents_num
+            com_num_batch.append(com_num)
+
             # 🌟 我们的主张是 将所有的query对应的box放在一起，判断两两iou，如果有某个和其他所有box的重合度都为0.1或者以下，认为它是独立检测，则这个不需要交互，直接参与最后的匹配
             attn_mask, valid_indicies, indep_queries = gaussian_atten_mask_from_bboxes(query_info_lst, decode_box_func=self.box_decode_func) # (M, M)的Mask
             # attn_mask = None
@@ -2908,8 +2949,219 @@ class TransformerInstanceV1(nn.Module):
                 valid_feat_pos = torch.cat(valid_feat_pos, dim=0).unsqueeze(0) # (1, M, D)
                 norm_bboxes = torch.cat(norm_bboxes, dim=0) # (M, 7)
 
+                """ coop_query_num = valid_feat.shape[1]
+                if self.sample_idx % 20 == 0:
+                    scaler = MinMaxScaler()
+                    query_data = valid_feat.squeeze(0).cpu().numpy()  # shape: (coop_query_num, 256)
+                    # 全局统计量
+                    global_min = query_data.min()
+                    global_max = query_data.max()
+                    q25, q75 = np.percentile(query_data, [25, 75])
+                    # 动态范围设置（排除离群值）
+                    iqr = q75 - q25
+                    vmin = max(global_min, q25 - 1.5*iqr)
+                    vmax = min(global_max, q75 + 1.5*iqr)
+                    
+                    # 平滑处理
+                    sigma = 1.5
+                    smoothed = gaussian_filter1d(query_data, sigma=sigma, axis=1)
+                    
+                    # 创建画布
+                    fig, axes = plt.subplots(coop_query_num, 1, 
+                                            figsize=(15, 2*coop_query_num),
+                                            gridspec_kw={'hspace':0.4})
+                    # 使用锐化的颜色映射
+                    cmap = plt.cm.nipy_spectral
+                    norm = plt.Normalize(vmin, vmax)
+                    
+                    for i, ax in enumerate(axes):
+                        # 绘制增强对比度的条形
+                        colors = cmap(norm(smoothed[i]))
+                        ax.bar(range(256), [1]*256, 
+                            width=1.0, 
+                            color=colors,
+                            edgecolor='none')
+                        
+                        # 添加维度标记
+                        if i == coop_query_num-1:
+                            ax.set_xticks([0, 64, 128, 192, 255])
+                            ax.set_xticklabels(['0', '64', '128', '192', '255'])
+                        else:
+                            ax.set_xticks([])
+                            
+                        ax.set_yticks([])
+                        ax.set_title(f'Query {i+1} (Min:{smoothed[i].min():.2f}, Max:{smoothed[i].max():.2f})', 
+                                    fontsize=8, pad=2)
+                        ax.spines['top'].set_visible(False)
+                        ax.spines['right'].set_visible(False)
+
+                    # 添加全局颜色条
+                    cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+                    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                    fig.colorbar(sm, cax=cax, label='Global Normalized Value')
+                    
+                    plt.savefig(os.path.join(save_dir, f'query_vis_{self.sample_idx}_{b}before.png'), 
+                            dpi=300, bbox_inches='tight')
+                    plt.close()
+
+                    vis_mask = attn_mask.cpu().numpy()
+
+                    raw_vmin = np.min(vis_mask[np.isfinite(vis_mask)])
+
+                    raw_vmax = np.max(vis_mask[np.isfinite(vis_mask)])
+                    # 处理极端值（如-inf）
+                    vis_mask = np.nan_to_num(vis_mask, nan=0.0, posinf=raw_vmax, neginf=raw_vmin)
+                    # 创建画布
+                    plt.figure(figsize=(10, 10), dpi=300)
+
+                    # 计算有效数值范围
+                    vmin = np.min(vis_mask[np.isfinite(vis_mask)])
+                    vmax = np.max(vis_mask[np.isfinite(vis_mask)])
+
+                    # 处理全零或单一值情况
+                    if vmin == vmax:
+                        vmin -= 1e-6
+                        vmax += 1e-6
+
+                    # 判断是否使用符号敏感归一化
+                    is_signed = vmin < 0
+
+                    # 动态选择归一化方式
+                    if is_signed:
+                        # 计算线性阈值（至少1e-5防止除零）
+                        linthresh = max(0.1 * max(abs(vmin), abs(vmax)), 1e-5)
+                        norm = SymLogNorm(linthresh=linthresh, 
+                                        linscale=0.5,
+                                        vmin=vmin,  # 使用实际范围
+                                        vmax=vmax)
+                        cmap = 'RdBu_r'
+                    else:
+                        # 确保LogNorm最小值合法
+                        safe_vmin = max(vmin, 1e-6) if vmin <= 0 else vmin
+                        norm = LogNorm(vmin=safe_vmin, vmax=vmax)
+                        cmap = 'viridis'
+
+                    # 绘制主图
+                    im = plt.imshow(vis_mask, 
+                                cmap=cmap,
+                                norm=norm,
+                                interpolation='nearest',
+                                origin='upper')
+                    
+                    # 安全添加颜色条
+                    if norm.vmin < norm.vmax:  # 最终验证范围合法性
+                        cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
+                        cbar.set_label('Attention Weight (Log Scale)')
+                    else:
+                        plt.text(0.5, 0.5, "Invalid Value Range", 
+                                ha='center', va='center', 
+                                transform=plt.gca().transAxes)
+                    
+                    # 设置坐标轴
+                    # plt.xlabel("Key Positions")
+                    # plt.ylabel("Query Positions")
+                    # plt.title(f"{title}\nValue Range: [{vmin:.2f}, {vmax:.2f}]")
+                    
+                    # 添加辅助等高线（可选）
+                    # if n <= 20:
+                    # 绘制等高线帮助识别数值变化
+                    # levels = np.linspace(vmin, vmax, 8)
+                    # cs = plt.contour(vis_mask, levels=levels, 
+                    #                 colors='black', linewidths=0.5)
+                    # plt.clabel(cs, inline=True, fontsize=8, fmt='%.1f')
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_dir, f'atten_{self.sample_idx}_{b}.png'), dpi=300, bbox_inches='tight')
+                    plt.close() """
+
                 fused_query = self.fd_atten(valid_feat, valid_feat_pos, attn_mask)
-                # fused_query = valid_feat
+                # fused_query = valid_feat # 消融实验
+
+                """ if self.sample_idx % 20 == 0:
+                    scaler = MinMaxScaler()
+                    query_data = fused_query.squeeze(0).cpu().numpy()  # shape: (coop_query_num, 256)
+                    # 全局统计量
+                    global_min = query_data.min()
+                    global_max = query_data.max()
+                    q25, q75 = np.percentile(query_data, [25, 75])
+                    # 动态范围设置（排除离群值）
+                    iqr = q75 - q25
+                    vmin = max(global_min, q25 - 1.5*iqr)
+                    vmax = min(global_max, q75 + 1.5*iqr)
+                    
+                    # 平滑处理
+                    sigma = 1.5
+                    smoothed = gaussian_filter1d(query_data, sigma=sigma, axis=1)
+                    
+                    # 创建画布
+                    fig, axes = plt.subplots(coop_query_num, 1, 
+                                            figsize=(15, 2*coop_query_num),
+                                            gridspec_kw={'hspace':0.4})
+                    # 使用锐化的颜色映射
+                    cmap = plt.cm.nipy_spectral
+                    norm = plt.Normalize(vmin, vmax)
+                    
+                    for i, ax in enumerate(axes):
+                        # 绘制增强对比度的条形
+                        colors = cmap(norm(smoothed[i]))
+                        ax.bar(range(256), [1]*256, 
+                            width=1.0, 
+                            color=colors,
+                            edgecolor='none')
+                        
+                        # 添加维度标记
+                        if i == coop_query_num-1:
+                            ax.set_xticks([0, 64, 128, 192, 255])
+                            ax.set_xticklabels(['0', '64', '128', '192', '255'])
+                        else:
+                            ax.set_xticks([])
+                            
+                        ax.set_yticks([])
+                        ax.set_title(f'Query {i+1} (Min:{smoothed[i].min():.2f}, Max:{smoothed[i].max():.2f})', 
+                                    fontsize=8, pad=2)
+                        ax.spines['top'].set_visible(False)
+                        ax.spines['right'].set_visible(False)
+
+                    # 添加全局颜色条
+                    cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+                    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                    fig.colorbar(sm, cax=cax, label='Global Normalized Value')
+                    
+                    plt.savefig(os.path.join(save_dir, f'query_vis_{self.sample_idx}_{b}after.png'), 
+                            dpi=300, bbox_inches='tight')
+                    plt.close()
+
+                    # # queries_scaled = scaler.fit_transform(fused_query.squeeze(0).cpu())
+                    # # 将二维数据展开为一维进行全局归一化
+                    # global_scaled = scaler.fit_transform(fused_query.squeeze(0).cpu().reshape(-1, 1)).reshape(coop_query_num, 256)
+                    # # queries_scaled = gaussian_filter1d(global_scaled, sigma=1.5, axis=1)
+                    # sigma = 1.5
+                    # queries_scaled = gaussian_filter1d(global_scaled, sigma=sigma, axis=1)
+                    # fig, axes = plt.subplots(coop_query_num, 1, figsize=(15, 2*coop_query_num))
+                    # for i, ax in enumerate(axes):
+                    #     # 将每个query的256维展开为颜色条
+                    #     cmap = plt.cm.viridis  # 选择颜色映射
+                    #     norm = plt.Normalize(vmin=0, vmax=1)
+                    #     bars = ax.bar(range(256), [1]*256,  # 高度统一为1
+                    #                 width=1.0, 
+                    #                 color=cmap(queries_scaled[i]))
+                        
+                    #     ax.set_xticks([])
+                    #     ax.set_yticks([])
+                    #     ax.set_title(f'Query {i+1} Vector Visualization', pad=10)
+                    #     ax.spines['top'].set_visible(False)
+                    #     ax.spines['right'].set_visible(False)
+                    #     ax.spines['bottom'].set_visible(False)
+                    #     ax.spines['left'].set_visible(False)
+                    # # 添加公共颜色条
+                    # # cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+                    # # sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                    # # fig.colorbar(sm, cax=cax, label='Normalized Value')
+
+                    # plt.tight_layout(rect=[0, 0, 0.9, 1])  # 留出颜色条位置
+                    # plt.savefig(os.path.join(save_dir, f'query_vector_bars_{self.sample_idx}_{b}_later.png'), dpi=300, bbox_inches='tight')
+                    # plt.close() """
+
 
                 queries = fused_query.squeeze(0) # n_all, 256
                 # print("queries shape is ", queries.shape)
@@ -2934,8 +3186,9 @@ class TransformerInstanceV1(nn.Module):
             ref_bboxes.append(ref_bbox)
             solo_bboxes.append(indep_boxes)
             
+            self.sample_idx += 1
 
-        return result, all_queries, ref_bboxes, solo_bboxes
+        return result, all_queries, ref_bboxes, solo_bboxes, com_num_batch
 
 class TransformerInstanceV2(nn.Module):
     def __init__(
@@ -2976,7 +3229,7 @@ class TransformerInstanceV2(nn.Module):
         self.decoder = TransformerDecoder(d_model, decoder_layer, num_decoder_layers, cp_flag)
         self.fd_atten = Fusion_Decoder(d_model)
 
-        self.agent_embed = nn.Parameter(torch.Tensor(2, d_model))
+        self.agent_embed = nn.Parameter(torch.Tensor(5, d_model))
         self.pos_embed_layer = MLP(8, d_model, d_model, 3)
         self.sample_idx = 0
         self.iou_rectifier = 0.68
@@ -3509,7 +3762,7 @@ class TransformerInstanceV2(nn.Module):
         return result, all_queries, ref_bboxes, solo_bboxes
 
 
-def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.10, decode_box_func = None):
+def gaussian_atten_mask_from_bboxes(all_queries, conf_thresh=0.1, decode_box_func = None):
 
     # 1) 先过滤置信度
     valid_indices = [i for i, q in enumerate(all_queries) if q['confidence'] >= conf_thresh]

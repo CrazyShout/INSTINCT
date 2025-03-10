@@ -121,7 +121,8 @@ def getEarlyFusionDataset(cls):
             object_bbx_center[:object_bbx_center_valid.shape[0]] = \
                 object_bbx_center_valid
             object_bbx_center[object_bbx_center_valid.shape[0]:] = 0
-            unique_indices = list(np.array(unique_indices)[range_mask])
+            if not self.train: # modified by xuyunjiang at 2025-03-04
+                unique_indices = list(np.array(unique_indices)[range_mask])
 
             # pre-process the lidar to voxel/bev/downsampled lidar
             lidar_dict = self.pre_processor.preprocess(projected_lidar_stack)

@@ -1,12 +1,12 @@
-name: dairv2x_point_pillar_lidar_v2vnet_withnoise
-data_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure"
-root_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
-validate_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
-test_dir: "dataset/my_dair_v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+name: dairv2x_point_pillar_lidar_v2vnet_wo_noise
+data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
+root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
+validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
+test_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
 
 
 noise_setting:
-  add_noise: True
+  add_noise: False
   args: 
     pos_std: 0.2
     rot_std: 0.2
@@ -17,9 +17,9 @@ yaml_parser: "load_point_pillar_params"
 train_params:
   batch_size: &batch_size 4
   epoches: 60
-  eval_freq: 4
-  save_freq: 4
-  max_cav: &max_cav 5
+  eval_freq: 2
+  save_freq: 2
+  max_cav: &max_cav 2
 
 input_source: ['lidar']
 label_type: 'lidar'
@@ -64,7 +64,7 @@ postprocess:
     w: 2
     h: 1.56
     r: &anchor_yaw [0, 90]
-    feature_stride: 4
+    feature_stride: 2
     num: &anchor_num 2
   target_args:
     pos_threshold: 0.6
@@ -95,15 +95,21 @@ model:
       num_features: 64
 
     base_bev_backbone: # backbone will downsample 2x
-      layer_nums: [3, 5, 8]
+      resnet: true
+      layer_nums: &layer_nums [3, 4, 5]
       layer_strides: [2, 2, 2]
-      num_filters: [64, 128, 256]
+      num_filters: &num_filters [64, 128, 256]
       upsample_strides: [1, 2, 4]
       num_upsample_filter: [128, 128, 128]
+      # layer_nums: [3, 5, 8]
+      # layer_strides: [2, 2, 2]
+      # num_filters: [64, 128, 256]
+      # upsample_strides: [1, 2, 4]
+      # num_upsample_filter: [128, 128, 128]
 
     shrink_header:
       kernal_size: [ 3 ]
-      stride: [ 2 ]
+      stride: [ 1 ]
       padding: [ 1 ]
       dim: [ 256 ]
       input_dim: 384 # 128 * 3
@@ -118,8 +124,10 @@ model:
       gru_flag: true
       agg_operator: "max" # max or avg
       conv_gru:
-        H: 50
-        W: 126
+        # H: 50
+        # W: 126
+        H: 100
+        W: 252
         num_layers: 1
         kernel_size: [[3,3]]
 

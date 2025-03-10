@@ -6,12 +6,33 @@
 from matplotlib import pyplot as plt
 import numpy as np
 import copy
+import matplotlib
 
 from opencood.tools.inference_utils import get_cav_box
 import opencood.visualization.simple_plot3d.canvas_3d as canvas_3d
 import opencood.visualization.simple_plot3d.canvas_bev as canvas_bev
 
-def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=False):
+# COLOR = ['DeepPink','Teal','GoldenRod','RoyalBlue','MediumPurple']
+COLOR = ['White','White','White','White','White']
+# COLOR = ['Navy','Navy','Navy','Navy','DeepPink']
+COLOR_RGB = [ tuple([int(cc * 255) for cc in matplotlib.colors.to_rgb(c)]) for c in COLOR]
+# COLOR_RGB[0] = tuple([102, 8, 116])
+# COLOR_RGB[1] = tuple([0, 168, 150])
+# COLOR_RGB[2] = tuple([255, 143, 0])
+# COLOR_RGB[3] = tuple([63, 81, 181])
+# COLOR_RGB[4] = tuple([139, 195, 74])
+
+COLOR_RGB[0] = tuple([0, 191, 255])
+COLOR_RGB[1] = tuple([0, 191, 255])
+COLOR_RGB[2] = tuple([0, 191, 255])
+COLOR_RGB[3] = tuple([0, 191, 255])
+COLOR_RGB[4] = tuple([0, 191, 255])
+
+
+# COLOR_RGB = [ tuple([int(cc * 255) for cc in matplotlib.colors.to_rgb(c)]) for c in COLOR]
+COLOR_PC = [tuple([int(cc*0.4 + 255*0.6) for cc in c]) for c in COLOR_RGB]
+
+def visualize(infer_result, pcd, pc_range, save_path, method='3d', vis_gt_box=True, vis_pred_box=True, left_hand=False, pcd_agent_split=None):
         """
         Visualize the prediction, ground truth with point cloud together.
         They may be flipped in y axis. Since carla is left hand coordinate, while kitti is right hand.
@@ -50,6 +71,8 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
         plt.figure(figsize=[(pc_range[3]-pc_range[0])/40, (pc_range[4]-pc_range[1])/40]) # 201.6/40， 80/40
         pc_range = [int(i) for i in pc_range] # 转换成整型 （-100， -40， -3， 100， 40, 1）
         pcd_np = pcd.cpu().numpy() # cpu上，转为numpy
+        split_points_index = np.cumsum(pcd_agent_split)[:-1] # 同场景点云划分
+        agent_split_pcd = np.split(pcd_np, split_points_index)
 
         pred_box_tensor = infer_result.get("pred_box_tensor", None) # N, 8, 3
         gt_box_tensor = infer_result.get("gt_box_tensor", None) # N, 8, 3
@@ -106,14 +129,23 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
             canvas = canvas_bev.Canvas_BEV_heading_right(canvas_shape=((pc_range[4]-pc_range[1])*10, (pc_range[3]-pc_range[0])*10),
                                             canvas_x_range=(pc_range[0], pc_range[3]), 
                                             canvas_y_range=(pc_range[1], pc_range[4]),
+                                            # canvas_bg_color=(242,242,242), # 灰色背景
+                                            canvas_bg_color=(0,0,0), # 灰色背景
                                             left_hand=left_hand) 
             # canvas_xy（N, 2）, valid_mask (N, ) 在lidar范围内的才标记的掩码
             canvas_xy, valid_mask = canvas.get_canvas_coords(pcd_np) # Get Canvas Coords 将点云的x，y单独取出，映射到canvas大小上
-            canvas.draw_canvas_points(canvas_xy[valid_mask]) # Only draw valid points 这是将点云画出来，可以自己选择颜色
+            # canvas.draw_canvas_points(canvas_xy[valid_mask]) # Only draw valid points 这是将点云画出来，可以自己选择颜色
+            for i, agent_pcd in enumerate(agent_split_pcd):
+                canvas_xy, valid_mask = canvas.get_canvas_coords(agent_pcd) # Get Canvas Coords
+                agent_colors = COLOR_RGB[i]
+                canvas.draw_canvas_points(canvas_xy[valid_mask], colors=agent_colors) # Only draw valid points
+
             if gt_box_tensor is not None:
-                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=gt_name) # 画绿色GT bbx
+                # canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=gt_name) # 画绿色GT bbx
+                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=None) # 画绿色GT bbx
             if pred_box_tensor is not None:
-                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=pred_name) # 画红色GT bbx
+                # canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=pred_name) # 画红色GT bbx
+                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=None) # 画红色GT bbx
 
             # heterogeneous
             lidar_agent_record = infer_result.get("lidar_agent_record", None)
@@ -128,13 +160,18 @@ def visualize(infer_result, pcd, pc_range, save_path, method='3d', left_hand=Fal
 
 
         elif method == '3d':
-            canvas = canvas_3d.Canvas_3D(left_hand=left_hand)
+            canvas = canvas_3d.Canvas_3D(canvas_bg_color=(0,0,0), left_hand=left_hand)
             canvas_xy, valid_mask = canvas.get_canvas_coords(pcd_np)
-            canvas.draw_canvas_points(canvas_xy[valid_mask])
+            # canvas.draw_canvas_points(canvas_xy[valid_mask])
+            for i, agent_pcd in enumerate(agent_split_pcd):
+                canvas_xy, valid_mask = canvas.get_canvas_coords(agent_pcd) # Get Canvas Coords
+                agent_colors = COLOR_RGB[i]
+                canvas.draw_canvas_points(canvas_xy[valid_mask], colors=agent_colors) # Only draw valid points
+
             if gt_box_tensor is not None:
-                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=gt_name)
+                canvas.draw_boxes(gt_box_np,colors=(0,255,0), texts=None)
             if pred_box_tensor is not None:
-                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=pred_name)
+                canvas.draw_boxes(pred_box_np, colors=(255,0,0), texts=None)
 
             # heterogeneous
             lidar_agent_record = infer_result.get("lidar_agent_record", None)

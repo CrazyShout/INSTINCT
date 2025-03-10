@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import opencood.utils.common_utils as common_utils
-from opencood.utils.transformation_utils import x1_to_x2, x_to_world
+from opencood.utils.transformation_utils import x1_to_x2, x_to_world, x1_to_x2_v2v4real
 from pyquaternion import Quaternion
 import copy
 
@@ -595,6 +595,74 @@ def project_world_objects(object_dict,
         if bbx_lidar.shape[0] > 0:
             output_dict.update({object_id: bbx_lidar})
 
+def project_world_objects_v2v4real(object_dict,
+                          output_dict,
+                          transformation_matrix,
+                          lidar_range,
+                          order):
+    """
+    Project the objects under world coordinates into another coordinate
+    based on the provided extrinsic.
+
+    Parameters
+    ----------
+    object_dict : dict
+        The dictionary contains all objects surrounding a certain cav.
+
+    output_dict : dict
+        key: object id, value: object bbx (xyzlwhyaw).
+
+    transformation_matrix : np.ndarray
+        From current object to ego.
+
+    lidar_range : list
+         [minx, miny, minz, maxx, maxy, maxz]
+
+    order : str
+        'lwh' or 'hwl'
+    """
+    for object_id, object_content in object_dict.items():
+        location = object_content['location']
+        rotation = object_content['angle']
+        center = object_content['center']
+        extent = object_content['extent']
+        if 'ass_id' not in object_content:
+            ass_id = object_id
+        else:
+            ass_id = object_content['ass_id']
+        if 'obj_type' not in object_content:
+            obj_type = 'Car'
+        else:
+            obj_type = object_content['obj_type']
+
+        # todo: pedestrain is not consdered yet
+        # todo: only single class now
+        if obj_type == 'Pedestrian':
+            continue
+
+        object_pose = [location[0] + center[0],
+                       location[1] + center[1],
+                       location[2] + center[2],
+                       rotation[0], rotation[1], rotation[2]]
+        object2lidar = x1_to_x2_v2v4real(object_pose, transformation_matrix)
+
+        # shape (3, 8)
+        bbx = create_bbx(extent).T
+        # bounding box under ego coordinate shape (4, 8)
+        bbx = np.r_[bbx, [np.ones(bbx.shape[1])]]
+
+        # project the 8 corners to world coordinate
+        bbx_lidar = np.dot(object2lidar, bbx).T
+        bbx_lidar = np.expand_dims(bbx_lidar[:, :3], 0)
+        bbx_lidar = corner_to_center(bbx_lidar, order=order)
+        bbx_lidar = mask_boxes_outside_range_numpy(bbx_lidar,
+                                                      lidar_range,
+                                                      order,
+                                                      2)
+
+        if bbx_lidar.shape[0] > 0:
+            output_dict.update({object_id: {'coord': bbx_lidar,
+                                            'ass_id': ass_id}})
 
 def project_world_objects_v2x(object_dict,
                           output_dict,

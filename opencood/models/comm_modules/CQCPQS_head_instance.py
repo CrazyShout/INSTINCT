@@ -659,7 +659,7 @@ class CQCPInstanceHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.25, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.10, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
@@ -687,8 +687,8 @@ class CQCPInstanceHead(nn.Module):
 
         return new_ret_dict
 
-    def compute_losses(self, outputs, targets, dn_meta=None):
-        loss_dict = self.losses(outputs, targets, dn_meta=dn_meta)
+    def compute_losses(self, outputs, targets, dn_meta=None, supervise_iou=False):
+        loss_dict = self.losses(outputs, targets, dn_meta=dn_meta, supervise_iou=supervise_iou)
 
         weight_dict = self.losses.weight_dict
         for k, v in loss_dict.items():
@@ -842,7 +842,7 @@ class CQCPInstanceHead(nn.Module):
                 "pred_ious": outputs["fused_ious"][bi]
             }
             
-            fused_losses = self.compute_losses(fused_outputs, [targets[bi]])
+            fused_losses = self.compute_losses(fused_outputs, [targets[bi]], supervise_iou=True)
             for k, v in fused_losses.items():
                 if k not in fused_dict:
                     fused_dict[k] = 0
@@ -1347,11 +1347,12 @@ class Det3DLoss(nn.Module):
         self.aux_loss = aux_loss
 
         self.det3d_losses = nn.ModuleDict()
+        self.supervise_iou_loss = MatchabilityAwareLoss(0.25, decode_func=decode_func)
         for loss in losses:
             if loss == "boxes":
                 self.det3d_losses[loss] = RegressionLoss(decode_func=decode_func)
             elif loss == "focal_labels":
-                self.det3d_losses[loss] = MatchabilityAwareLoss(0.25, decode_func=decode_func) # alpha=0.25
+                self.det3d_losses[loss] = ClassificationLoss(0.25) # alpha=0.25
             else:
                 raise ValueError(f"Only boxes|focal_labels are supported for det3d losses. Found {loss}")
 
@@ -1376,7 +1377,7 @@ class Det3DLoss(nn.Module):
 
         return output_known_lbs_bboxes, single_pad, num_dn_groups
 
-    def forward(self, outputs, targets, dn_meta=None):
+    def forward(self, outputs, targets, dn_meta=None, supervise_iou=False):
         '''
         outputs: Dict, DQS结果或者是模型输出的结果
         targets: List [Dict{}, Dict{}...] batch中按样本分结果
@@ -1449,6 +1450,10 @@ class Det3DLoss(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs, targets) # List[((n1),(n1)), ...] 匹配结果索引，注意，这是1000个query与gt的匹配
+        if supervise_iou:
+            losses.update(self.supervise_iou_loss(outputs, targets, indices, num_boxes))
+            losses.update(self.det3d_losses["boxes"](outputs, targets, indices, num_boxes))
+            return losses
         for loss in self.losses: # ["focal_labels", "boxes"]
             losses.update(self.det3d_losses[loss](outputs, targets, indices, num_boxes))
 

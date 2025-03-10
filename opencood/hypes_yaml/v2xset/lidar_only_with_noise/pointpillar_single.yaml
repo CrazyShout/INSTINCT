@@ -1,17 +1,17 @@
-name: opv2v_point_pillar_lidar_late_fusion_origin
-root_dir: "my_opv2v/train"
-validate_dir: "my_opv2v/validate"
-test_dir: "my_opv2v/test"
-# root_dir: "my_v2xset/train"
-# validate_dir: "my_v2xset/validate"
-# test_dir: "my_v2xset/test"
+name: v2xset_point_pillar_lidar_late_fusion_stride4
+data_dir: "my_v2xset"
+root_dir: "my_v2xset/train"
+validate_dir: "my_v2xset/validate"
+test_dir: "my_v2xset/test"
 
 yaml_parser: "load_point_pillar_params"
 train_params:
-  batch_size: &batch_size 16
-  epoches: 60
-  eval_freq: 1
-  save_freq: 1
+  batch_size: &batch_size 4
+  epoches: 15
+  eval_freq: 2
+  save_freq: 2
+
+dataset: 'v2xset'
 
 input_source: ['lidar']
 label_type: 'lidar'
@@ -21,7 +21,7 @@ only_vis_ego: true
 
 fusion:
   core_method: 'late'
-  dataset: 'opv2v'
+  dataset: 'v2xset'
   args: []
 
 # preprocess-related
@@ -34,7 +34,7 @@ preprocess:
     max_voxel_train: 16000
     max_voxel_test: 40000
   # lidar range for each individual cav.
-  cav_lidar_range: &cav_lidar [-70.4, -40, -3, 70.4, 40, 1]
+  cav_lidar_range: &cav_lidar [-140.8, -40, -3, 140.8, 40, 1]
 
 data_augment:
   - NAME: random_world_flip
@@ -56,7 +56,7 @@ postprocess:
     w: 1.6
     h: 1.56
     r: &anchor_yaw [0, 90]
-    feature_stride: 2
+    feature_stride: 4
     num: &anchor_num 2
   target_args:
     pos_threshold: 0.6
@@ -87,17 +87,23 @@ model:
       num_features: 64
 
     base_bev_backbone:
-      resnet: true
-      layer_nums: [3, 4, 5]
+      # resnet: true
+      # layer_nums: [3, 4, 5]
+      # layer_strides: [2, 2, 2]
+      # num_filters: [64, 128, 256]
+      # upsample_strides: [1, 2, 4]
+      # num_upsample_filter: [128, 128, 128]
+      layer_nums: [3, 5, 8]
       layer_strides: [2, 2, 2]
       num_filters: [64, 128, 256]
       upsample_strides: [1, 2, 4]
       num_upsample_filter: [128, 128, 128]
 
+
     shrink_header:
       use_atten: false
       kernal_size: [ 3 ]
-      stride: [ 1 ]
+      stride: [ 2 ]
       padding: [ 1 ]
       dim: [ 256 ]
       input_dim: 384 # 128 * 3

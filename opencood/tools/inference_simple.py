@@ -155,7 +155,7 @@ def main():
     opencood_dataset = build_dataset(hypes, visualize=True, train=False)
     data_loader = DataLoader(opencood_dataset,
                             batch_size=1,
-                            num_workers=4,
+                            num_workers=6,
                             collate_fn=opencood_dataset.collate_batch_test,
                             shuffle=False,
                             pin_memory=False,
@@ -173,6 +173,7 @@ def main():
 
     infer_info = opt.fusion_method + opt.note
 
+    com_num_all = []
     print(f"==={infer_info}===")
     for i, batch_data in tenumerate(data_loader):
         # print(f"{infer_info}_{i}") #
@@ -210,6 +211,9 @@ def main():
                 raise NotImplementedError('Only single, no, no_w_uncertainty, early, late and intermediate'
                                         'fusion is supported.')
 
+            if 'com_num_batch' in infer_result:
+                com_num_all += infer_result['com_num_batch']
+                
             pred_box_tensor = infer_result['pred_box_tensor']
             gt_box_tensor = infer_result['gt_box_tensor']
             pred_score = infer_result['pred_score']
@@ -264,7 +268,8 @@ def main():
                 #                     hypes['postprocess']['gt_range'],
                 #                     vis_save_path,
                 #                     method='3d',
-                #                     left_hand=left_hand)
+                #                     left_hand=left_hand,
+                #                     pcd_agent_split = [])
                  
                 vis_save_path = os.path.join(vis_save_path_root, 'bev_%05d.png' % i)
                 simple_vis.visualize(infer_result,
@@ -273,9 +278,12 @@ def main():
                                     hypes['postprocess']['gt_range'],
                                     vis_save_path,
                                     method='bev',
-                                    left_hand=left_hand)
+                                    left_hand=left_hand,
+                                    # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                                    pcd_agent_split = [])
         torch.cuda.empty_cache()
-
+    com_num_avg = sum(com_num_all)/max(len(com_num_all), 1)
+    print(f"=== avg comm query num is {com_num_avg} ===")
     _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                 opt.model_dir, infer_info)
     if opt.fusion_method == 'no_w_uncertainty':

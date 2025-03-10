@@ -396,7 +396,7 @@ class CQCPInstanceHead(nn.Module):
             targets = None
         # print("input_query_bbox shape is", input_query_bbox.shape)
         # print("input_query_label shape is", input_query_label.shape)
-        outputs, all_queries, ref_bboxes, solo_bboxes = self.transformer(
+        outputs, all_queries, ref_bboxes, solo_bboxes, com_num_batch = self.transformer(
             features, # [(B, 256, H, W)]
             pos_encodings, # [(B, 256, H, W)]
             input_query_bbox, # (B, pad_size, 7)
@@ -522,7 +522,7 @@ class CQCPInstanceHead(nn.Module):
             pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
             return pred_dicts, outputs_class, outputs_coord, dn_meta
         else:
-            pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs)
+            pred_dicts = dict(enc_outputs=enc_outputs, outputs=outputs, com_num_batch=com_num_batch)
             return pred_dicts
 
     def forward(self, batch_dict):
@@ -534,6 +534,7 @@ class CQCPInstanceHead(nn.Module):
         if not self.train_flag:
             bboxes = self.get_bboxes(pred_dicts)
             batch_dict['final_box_dicts'] = bboxes
+            batch_dict['final_box_dicts'][0].update({'com_num_batch': pred_dicts['com_num_batch']})
         else:
             gt_bboxes_3d_single = batch_dict['object_bbx_center_single'] # (B_n, maxnum, 7)
             gt_bboxes_3d_mask_single = batch_dict['object_bbx_mask_single'] # (B_n, maxnum)
@@ -640,7 +641,7 @@ class CQCPInstanceHead(nn.Module):
             # out_bbox_i = torch.cat(out_bbox_i_list, dim=0)
             # out_iou_i = torch.cat(out_iou_i_list, dim=0)
             '''
-            topk_indices_i = torch.nonzero(out_prob_i >= 0.25, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
+            topk_indices_i = torch.nonzero(out_prob_i >= 0.15, as_tuple=True)[0] # 筛选置信度大于0.1的的索引 (n, )
             scores = out_prob_i[topk_indices_i] # (n, ) 这个因为多cls也是相同的repeat 所以不用上面的操作
 
             labels, boxes, topk_indices = _process_output(topk_indices_i.view(-1), out_bbox_i) # 分别得到标签和bbox shape 为 (n, ) and (n, 7)
@@ -1140,6 +1141,8 @@ class MatchabilityAwareLoss(nn.Module):
             src_boxes = self.decode_func(src_boxes)
             ious = iou3d_nms_utils.boxes_iou_bev(src_boxes, target_boxes) # (n_all, n_all)
             ious = torch.diag(ious).detach() # 返回的是一个1D张量 (n_all,) 预测与其gt对应的iou
+            # ious = iou3d_nms_utils.paired_boxes_iou3d_gpu(src_boxes, target_boxes) # (n_all, n_all)
+            # ious = ious.detach()
             target_score_o[idx] = ious.to(target_score_o.dtype) # (B, HW)
 
         target_score = target_score_o.unsqueeze(-1) * target_classes_onehot # （B, HW, 1） det损失时为 (B, 1000, 1)  标签对应的那个类变成一个分数

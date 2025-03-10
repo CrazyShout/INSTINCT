@@ -42,7 +42,12 @@ def getLatev2FusionDataset(cls):
             # self.anchor_box_torch = torch.from_numpy(self.anchor_box)
             self.point_cloud_range = self.params['preprocess']['cav_lidar_range']
             self.code_size = self.params['model']['args']['dense_head']['code_size']
-
+            if "dataset" in self.params:
+                self.dataset_name = self.params['dataset']
+                print(f"=== dataset name is {self.dataset_name} ===")
+            else:
+                raise ValueError("we must provide the name of dataset!")
+            
         def encode_bbox(self, bboxes): # 输入的是n, 7
             z_normalizer = 10
             targets = np.zeros([bboxes.shape[0], self.code_size], dtype=np.float32) # n, 7 同时这里有一个隐式数据类型转变将target 类型从torch.float64变成torch.float32 如果没有这个过程，会报各种类型错误
@@ -564,16 +569,20 @@ def getLatev2FusionDataset(cls):
             pred_box_tensor, pred_score = self.post_processor.post_process_no_anchor(
                 data_dict, output_dict
             )
-            # gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict) # for orther datasets
-            gt_box_tensor = self.post_processor.generate_gt_bbx_by_iou(data_dict) # for dair-v2x datasets
+            if self.dataset_name == 'dairv2x':
+                gt_box_tensor = self.post_processor.generate_gt_bbx_by_iou(data_dict) # for dair-v2x datasets
+            else:
+                gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict) # for orther datasets
             
             return pred_box_tensor, pred_score, gt_box_tensor
 
         def post_process_no_fusion(self, data_dict, output_dict_ego):
             data_dict_ego = OrderedDict()
             data_dict_ego["ego"] = data_dict["ego"]
-            # gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict) # for orther datasets
-            gt_box_tensor = self.post_processor.generate_gt_bbx_by_iou(data_dict) # for dair-v2x datasets
+            if self.dataset_name == 'dairv2x':
+                gt_box_tensor = self.post_processor.generate_gt_bbx_by_iou(data_dict) # for dair-v2x datasets
+            else:
+                gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict) # for orther datasets
 
             # pred_box_tensor, pred_score = self.post_processor.post_process(
             #     data_dict_ego, output_dict_ego

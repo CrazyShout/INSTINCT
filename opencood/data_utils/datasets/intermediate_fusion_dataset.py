@@ -433,7 +433,11 @@ def getIntermediateFusionDataset(cls):
                 processed_data_dict['ego'].update({'origin_lidar':
                     np.vstack(
                         projected_lidar_stack)})
-
+                split_num = []
+                for pd in projected_lidar_stack:
+                    split_num.append(pd.shape[0])
+                processed_data_dict['ego'].update({'origin_lidar_splitnum':
+                    split_num}) # [n1, n2, ...]
 
             processed_data_dict['ego'].update({'sample_idx': idx,
                                                 'cav_id_list': cav_id_list})
@@ -455,6 +459,7 @@ def getIntermediateFusionDataset(cls):
             label_dict_list = []
             lidar_pose_list = []
             origin_lidar = []
+            origin_lidar_splitnum = []
             lidar_pose_clean_list = []
 
             # pairwise transformation matrix
@@ -489,6 +494,7 @@ def getIntermediateFusionDataset(cls):
 
                 if self.visualize:
                     origin_lidar.append(ego_dict['origin_lidar'])
+                    origin_lidar_splitnum.append(ego_dict['origin_lidar_splitnum'])
 
                 if self.kd_flag:
                     teacher_processed_lidar_list.append(ego_dict['teacher_processed_lidar'])
@@ -549,10 +555,13 @@ def getIntermediateFusionDataset(cls):
 
 
             if self.visualize:
+                # origin_lidar = \
+                #     np.array(downsample_lidar_minimum(pcd_np_list=origin_lidar))
                 origin_lidar = \
-                    np.array(downsample_lidar_minimum(pcd_np_list=origin_lidar))
+                    np.array(origin_lidar) # 不要打乱，否则将无法分别可视化每个agent的点云 2024年8月16日 xyj
                 origin_lidar = torch.from_numpy(origin_lidar)
                 output_dict['ego'].update({'origin_lidar': origin_lidar})
+                output_dict['ego'].update({'origin_lidar_splitnum': origin_lidar_splitnum})
 
             if self.kd_flag:
                 teacher_processed_lidar_torch_dict = \

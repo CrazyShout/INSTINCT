@@ -12,6 +12,7 @@ import cv2
 
 from opencood.utils import box_utils
 from opencood.utils import common_utils
+from opencood.utils.transformation_utils import x1_to_x2
 
 class BasePostprocessor(object):
     """
@@ -67,7 +68,6 @@ class BasePostprocessor(object):
         gt_box3d_list = []
         # used to avoid repetitive bounding box
         object_id_list = []
-
         for cav_id, cav_content in data_dict.items():
             # used to project gt bounding box to ego space
             # object_bbx_center is clean.
@@ -88,12 +88,17 @@ class BasePostprocessor(object):
             gt_box3d_list.append(projected_object_bbx_corner)
             # append the corresponding ids
             object_id_list += object_ids
-
         # gt bbx 3d
         gt_box3d_list = torch.vstack(gt_box3d_list)
         # some of the bbx may be repetitive, use the id list to filter
         gt_box3d_selected_indices = \
             [object_id_list.index(x) for x in set(object_id_list)]
+        # print("gt_box3d_list shape is ", gt_box3d_list.shape)
+        # print("gt_box3d_selected_indices  is ", gt_box3d_selected_indices)
+        # # print("gt_box3d_list device  is ", gt_box3d_list.device)
+        # print("object_id_list   is ", object_id_list)
+        
+        # print("gt_box3d_selected_indices device  is ", gt_box3d_selected_indices.device)
         gt_box3d_tensor = gt_box3d_list[gt_box3d_selected_indices]
 
         # filter the gt_box to make sure all bbx are in the range. with z dim
@@ -377,6 +382,73 @@ class BasePostprocessor(object):
 
         return object_np, mask, object_ids
 
+
+    def generate_object_center_v2v4real(self,
+                                        cav_contents,
+                                        reference_lidar_pose,
+                                        enlarge_z=False):
+        """
+        Retrieve all objects in a format of (n, 7), where 7 represents
+        x, y, z, l, w, h, yaw or x, y, z, h, w, l, yaw.
+
+        Parameters
+        ----------
+        cav_contents : list
+            List of dictionary, save all cavs' information.
+            in fact it is used in get_item_single_car, so the list length is 1
+
+        reference_lidar_pose : list
+            The final target lidar pose with length 6.
+
+        enlarge_z :
+            if True, enlarge the z axis range to include more object
+
+        Returns
+        -------
+        object_np : np.ndarray
+            Shape is (max_num, 7).
+        mask : np.ndarray
+            Shape is (max_num,).
+        object_ids : list
+            Length is number of bbx in current sample.
+        """
+        tmp_object_dict = {}
+        for cav_content in cav_contents:
+            tmp_object_dict.update(cav_content['params']['vehicles'])
+            cav_id = cav_content['cav_id']
+
+        output_dict = {}
+        filter_range = self.params['anchor_args']['cav_lidar_range'] \
+            if self.train else self.params['gt_range']
+
+        # TODO: we should use reference_lidar_pose
+        tfm = x1_to_x2(cav_contents[0]['params']['true_ego_pos'], reference_lidar_pose)
+        box_utils.project_world_objects_v2v4real(tmp_object_dict,
+                                                 output_dict,
+                                                 tfm,
+                                                 filter_range,
+                                                 self.params['order'])
+        # box_utils.project_world_objects_v2v4real(tmp_object_dict,
+        #                                 output_dict,
+        #                                 np.identity(4),
+        #                                 filter_range,
+        #                                 self.params['order'])
+
+        object_np = np.zeros((self.params['max_num'], 7))
+        mask = np.zeros(self.params['max_num'])
+        object_ids = []
+
+        # for v2v4real
+        for i, (object_id, object_content) in enumerate(output_dict.items()):
+            object_bbx = object_content['coord']
+            object_np[i] = object_bbx[0, :]
+            mask[i] = 1
+            if object_content['ass_id'] != -1:
+                object_ids.append(object_content['ass_id'])
+            else:
+                object_ids.append(object_id + 100 * cav_id)
+
+        return object_np, mask, object_ids
 
     def generate_object_center_dairv2x_single(self,
                                cav_contents,

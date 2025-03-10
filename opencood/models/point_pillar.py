@@ -37,7 +37,7 @@ class PointPillar(nn.Module):
         if 'shrink_header' in args:
             print("===use downsample conv to reduce memory===")
             self.shrink_flag = True
-            if args['shrink_header']['use_atten']:
+            if 'use_atten' in args['shrink_header'] and args['shrink_header']['use_atten']:
                 self.shrink_conv = AttentionDownsampleConv(args['shrink_header'])
             else:
                 self.shrink_conv = DownsampleConv(args['shrink_header'])

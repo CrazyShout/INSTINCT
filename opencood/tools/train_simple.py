@@ -33,11 +33,14 @@ def train_parser():
                         help='Continued training path')
     parser.add_argument('--fusion_method', '-f', default="intermediate",
                         help='passed to inference.')
+    parser.add_argument('--lowest_loss', '-ll', default="1e5",
+                        help='passed to inference.')
     opt = parser.parse_args()
     return opt
 
 
 def main():
+    # torch.autograd.set_detect_anomaly(True) # 异常检测，debug only use
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
 
@@ -69,8 +72,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # record lowest validation loss checkpoint.
-    lowest_val_loss = 1e5
+    lowest_val_loss = float(opt.lowest_loss) # 2.823591 # 1e5
     lowest_val_epoch = -1
+
+    print(f"lowest val loss is {lowest_val_loss}")
 
     # load pre-train model for single view
     is_pre_trained = False
@@ -166,7 +171,7 @@ def main():
             optimizer.zero_grad()
             batch_data = train_utils.to_device(batch_data, device)
             batch_data['ego']['epoch'] = epoch # type: ignore
-
+            
             # 前向传播和计算损失
             final_loss, tb_dict = model(batch_data['ego']) # type: ignore
             final_loss = final_loss.mean()
@@ -199,7 +204,9 @@ def main():
             # optimizer.zero_grad()
 
             # back-propagation
-            # torch.autograd.set_detect_anomaly(True) # 异常检测，debug only use
+            # torch.cuda.synchronize() # 同步等待操作完成
+            # with torch.autograd.set_detect_anomaly():
+            #     final_loss.backward()
             # torch.autograd.set_grad_enabled(True)
             final_loss.backward()
 

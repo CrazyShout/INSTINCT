@@ -14,6 +14,63 @@ from opencood.models.sub_modules.naive_compress import NaiveCompressor
 from opencood.models.fuse_modules.fusion_in_one import MaxFusion, AttFusion, DiscoFusion, V2VNetFusion, V2XViTFusion, When2commFusion
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
 
+import numpy as np
+import torch
+from opencood.utils.transformation_utils import tfm_to_pose, x1_to_x2, x_to_world
+from opencood.utils.pose_utils import generate_noise
+
+
+def get_pairwise_transformation2ego(lidar_pose, noise_level, max_cav=2):
+    """
+    Get transformation matrixes accross different agents to curr ego at all past timestamps.
+
+    Parameters
+    ----------
+    past_k_lidar_pose: np.array [N, 6]
+    
+    ego_pose : list
+        ego pose
+
+    max_cav : int
+        The maximum number of cav, default 5
+
+    Return
+    ------
+    pairwise_t_matrix : np.array
+        The transformation matrix each cav to curr ego at past k frames.
+        shape: (L, k, 4, 4), L is the max cav number in a scene, k is the num of past frames
+        pairwise_t_matrix[i, j] is T i_to_ego at past_j frame
+    """
+    pos_std = noise_level['pos_std']
+    rot_std = noise_level['rot_std']
+    pos_mean = 0 
+    rot_mean = 0
+    
+    pairwise_t_matrix = np.tile(np.eye(4), (max_cav, max_cav, 1, 1)) # (L, L, 4, 4)
+
+    ego_pose = lidar_pose[0]
+
+    t_list = []
+
+    # save all transformation matrix in a list in order first.
+    for cav_id in range(lidar_pose.shape[0]):
+        loc_noise = generate_noise(pos_std, rot_std)
+        t_list.append(x_to_world(lidar_pose[cav_id].cpu().numpy()+loc_noise)) # Twx
+    
+    ego_pose = x_to_world(ego_pose.cpu().numpy())
+
+    for i in range(len(t_list)):
+        for j in range(len(t_list)):
+            # identity matrix to self
+            if i != j:
+                # i->j: TiPi=TjPj, Tj^(-1)TiPi = Pj
+                # t_matrix = np.dot(np.linalg.inv(t_list[j]), t_list[i])
+                t_matrix = np.linalg.solve(t_list[j], t_list[i])  # Tjw*Twi = Tji
+                pairwise_t_matrix[i, j] = t_matrix
+
+    pairwise_t_matrix = torch.tensor(pairwise_t_matrix).to(lidar_pose.device)
+    return pairwise_t_matrix
+
 class PointPillarBaseline(nn.Module):
     """
     F-Cooper implementation with point pillar backbone.
@@ -107,6 +164,11 @@ class PointPillarBaseline(nn.Module):
                       'voxel_coords': voxel_coords,
                       'voxel_num_points': voxel_num_points,
                       'record_len': record_len}
+        # if record_len.shape[0] == 1:
+        #     noise_level = {'pos_std': 0.4, 'rot_std': 0.4, 'pos_mean': 0, 'rot_mean': 0}
+        #     noised_pairwise_t_matrix = get_pairwise_transformation2ego(data_dict['lidar_pose'], noise_level, max_cav=2).unsqueeze(0)
+        #     data_dict['pairwise_t_matrix'] = noised_pairwise_t_matrix
+
         # n, 4 -> n, c
         batch_dict = self.pillar_vfe(batch_dict)
         # n, c -> N, C, H, W

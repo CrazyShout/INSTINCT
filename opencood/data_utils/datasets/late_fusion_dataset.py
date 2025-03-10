@@ -39,6 +39,7 @@ def getLateFusionDataset(cls):
             super().__init__(params, visualize, train)
             self.anchor_box = self.post_processor.generate_anchor_box()
             self.anchor_box_torch = torch.from_numpy(self.anchor_box)
+            self.avg_boxes_num = []
 
         def __getitem__(self, idx):
             base_data_dict = self.retrieve_base_data(idx)
@@ -537,7 +538,7 @@ def getLateFusionDataset(cls):
             gt_box_tensor : torch.Tensor
                 The tensor of gt bounding box.
             """
-            pred_box_tensor, pred_score = self.post_processor.post_process(
+            pred_box_tensor, pred_score, boxes_num_b = self.post_processor.post_process(
                 data_dict, output_dict
             )
             gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)

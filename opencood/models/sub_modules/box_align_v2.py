@@ -76,26 +76,40 @@ def vis_pose_graph(poses, pred_corner3d, save_dir_path, vis_agent=False):
         plt.clf()
 
 
+# def all_pair_l2(A, B):
+#     """ All pair L2 distance for A and B
+#     Args:
+#         A : np.ndarray
+#             shape [N_A, D]
+#         B : np.ndarray
+#             shape [N_B, D]
+#     Returns:
+#         C : np.ndarray
+#             shape [N_A, N_B]
+#     """
+#     TwoAB = 2*A@B.T  # [N_A, N_B]
+#     C = np.sqrt(
+#               np.sum(A * A, 1, keepdims=True).repeat(TwoAB.shape[1], axis=1) \
+#             + np.sum(B * B, 1, keepdims=True).T.repeat(TwoAB.shape[0], axis=0) \
+#             - TwoAB
+#         )
+#     return C
+
 def all_pair_l2(A, B):
-    """ All pair L2 distance for A and B
-    Args:
-        A : np.ndarray
-            shape [N_A, D]
-        B : np.ndarray
-            shape [N_B, D]
-    Returns:
-        C : np.ndarray
-            shape [N_A, N_B]
-    """
-    TwoAB = 2*A@B.T  # [N_A, N_B]
-    C = np.sqrt(
-              np.sum(A * A, 1, keepdims=True).repeat(TwoAB.shape[1], axis=1) \
-            + np.sum(B * B, 1, keepdims=True).T.repeat(TwoAB.shape[0], axis=0) \
-            - TwoAB
-        )
-    return C
-
-
+    """ All pair L2 distance for A and B (数值稳定版本) """
+    TwoAB = 2 * A @ B.T  # [N_A, N_B]
+    
+    # 更高效的广播方式计算平方和
+    sum_A_sq = np.sum(A**2, axis=1)[:, np.newaxis]  # [N_A, 1]
+    sum_B_sq = np.sum(B**2, axis=1)[np.newaxis, :]  # [1, N_B]
+    
+    # 计算距离平方（理论上应 >=0）
+    distance_sq = sum_A_sq + sum_B_sq - TwoAB  # 自动广播为[N_A, N_B]
+    
+    # 处理数值误差导致的微小负数（设为0）
+    distance_sq = np.maximum(distance_sq, 0.0)
+    
+    return np.sqrt(distance_sq)
 
 
 def box_alignment_relative_sample_np(

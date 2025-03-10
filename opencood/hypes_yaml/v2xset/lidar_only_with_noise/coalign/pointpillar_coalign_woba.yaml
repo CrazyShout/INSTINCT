@@ -1,10 +1,11 @@
-name: opv2v_coalign_woba_withnoise
-root_dir: "dataset/OPV2V/train"
-validate_dir: "dataset/OPV2V/validate"
-test_dir: "dataset/OPV2V/test"
+name: opv2v_coalign_woba_wo_noise
+data_dir: "my_v2xset"
+root_dir: "my_v2xset/train"
+validate_dir: "my_v2xset/validate"
+test_dir: "my_v2xset/test"
 
 noise_setting:
-  add_noise: True
+  add_noise: False
   args: 
     pos_std: 0.2
     rot_std: 0.2
@@ -20,6 +21,8 @@ train_params:
   save_freq: 3
   max_cav: &max_cav 5
 
+dataset: 'v2xset'
+
 input_source: ['lidar']
 label_type: 'lidar'
 
@@ -27,7 +30,7 @@ comm_range: 70
 
 fusion:
   core_method: 'intermediate'
-  dataset: 'opv2v'
+  dataset: 'v2xset'
   args: 
     proj_first: false
 
@@ -106,9 +109,15 @@ model:
       num_features: 64
 
     base_bev_backbone: # backbone will downsample 2x
-      layer_nums: [3, 5, 8]
+      # layer_nums: [3, 5, 8]
+      # layer_strides: [2, 2, 2]
+      # num_filters: [64, 128, 256]
+      # upsample_strides: [1, 2, 4]
+      # num_upsample_filter: [128, 128, 128]
+      resnet: true
+      layer_nums: &layer_nums [3, 4, 5]
       layer_strides: [2, 2, 2]
-      num_filters: [64, 128, 256]
+      num_filters: &num_filters [64, 128, 256]
       upsample_strides: [1, 2, 4]
       num_upsample_filter: [128, 128, 128]
 

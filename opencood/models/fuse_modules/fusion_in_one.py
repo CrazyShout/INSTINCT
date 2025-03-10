@@ -430,3 +430,138 @@ class When2commFusion(nn.Module):
         
         return out
 
+class DomainEncoder(nn.Module):
+    def __init__(self, inplanes, planes):
+        super(DomainEncoder, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+  
+        self.conv2 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.relu = nn.LeakyReLU(inplace=True)
+
+        self.conv3 = nn.Conv2d(planes, inplanes, kernel_size=1)
+
+    def forward(self, x):
+        out = self.bn1(self.conv1(x))
+        identity = self.bn2(self.conv2(x))
+        out += identity
+        out = self.relu(out)
+        out = self.conv3(out)
+        return out
+
+class SpatialEncoder2(nn.Module):
+    def __init__(self, inplanes, planes):
+        super(SpatialEncoder2, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, 1, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(1)
+  
+        self.conv2 = nn.Conv2d(inplanes, 1, kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        out = self.bn1(self.conv1(x))
+        out2 = self.bn2(self.conv2(x))
+        #out3 = torch.max(x, dim=1).values
+        out3 = torch.max(x, dim=1, keepdim=True).values
+        out = out + out2 + out3
+
+        return out
+
+class DimReduction(nn.Module):
+    def __init__(self, inplanes, planes, norm_layer=None):
+        super(DimReduction, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.LeakyReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        return out
+
+class SimpleGate(nn.Module):
+    def __init__(self, inplane, outplane):
+        super(SimpleGate, self).__init__()
+        self.gate = nn.Sequential(
+        nn.Conv2d(inplane, outplane, 3, 1, 1),
+        nn.Sigmoid()
+    )
+
+    def forward(self, feature_origin, flow):
+        flow_gate = self.gate(feature_origin)
+        flow = flow*flow_gate
+        return flow
+
+class DomainGeneralizedFeatureFusion3(nn.Module):
+    def __init__(self, single_dims, vis_feats):
+        super(DomainGeneralizedFeatureFusion3, self).__init__()
+        self.fused_dims = single_dims * 2
+        print('using DGFF3 fusion without RT matrix.')
+
+        # Doamin generalized feature  encoder
+        self.domain_encoder = DomainEncoder(self.fused_dims, self.fused_dims//8)
+        self.spatial_encoder = SpatialEncoder2(self.fused_dims, self.fused_dims//8)
+        # Dimension reduction 
+        self.dim_reduction = DimReduction(self.fused_dims, single_dims)
+
+        self.down_vehicle = nn.Conv2d(single_dims, single_dims, 1, bias=False)
+        self.down_inf = nn.Conv2d(single_dims, single_dims, 1, bias=False)
+        self.flow_make = nn.Conv2d(self.fused_dims, 2, kernel_size=3, padding=1, bias=False)
+        self.gate = SimpleGate(single_dims, 2)
+
+        self.vis_feats = vis_feats
+
+    def forward(self, xx, record_len, pairwise_t_matrix):
+        _, C, H, W = xx.shape
+        B, L = pairwise_t_matrix.shape[:2]
+        split_x = regroup(xx, record_len)
+        batch_node_features = split_x
+        out = []
+        # iterate each batch
+
+        for b in range(B):
+            x = batch_node_features[b]
+            num_cav = x.shape[0]
+            if num_cav > 1:
+                x1 = x[0].view(1, C, H, W)
+                x2 = x[1].view(1, C, H, W)
+                # algin feature
+                x1 = self.down_vehicle(x1)
+                x2 = self.down_inf(x2)
+                flow = self.flow_make(torch.cat([x1, x2], 1))
+                flow = self.gate(x1, flow)
+                x2 = self.flow_warp(x2, flow, size=(H, W))
+                concat = torch.cat([x1, x2], dim=0).view(1, 2*C, H, W)
+                # domain attention
+                domain_attention = self.domain_encoder(concat) #(1, 2*C, H, W)
+                domain_attention = F.softmax(domain_attention.view(1, C, 2, H, W), dim = 2)
+                
+                spatial_attention = self.spatial_encoder(concat).view(1, 1, 1, H, W)  #(1, 1, H, W)
+
+                fused_feature = torch.mul(domain_attention*spatial_attention, concat.view(1, C, 2, H, W)).view(1,-1, H, W)
+                # dimension reduction 
+                x = self.dim_reduction(fused_feature)
+            out.append(x[0])
+
+        out = torch.stack(out)
+
+        if self.vis_feats:
+            return  out, batch_node_features[0]
+        else:
+            return out
+    
+    def flow_warp(self, input, flow, size):
+        out_h, out_w = size
+        n, c, h, w = input.size()
+
+        norm = torch.tensor([[[[out_w, out_h]]]]).type_as(input).to(input.device)
+        w = torch.linspace(-1.0, 1.0, out_h).view(-1, 1).repeat(1, out_w)
+        h = torch.linspace(-1.0, 1.0, out_w).repeat(out_h, 1)
+        grid = torch.cat((h.unsqueeze(2), w.unsqueeze(2)), 2)
+        grid = grid.repeat(n, 1, 1, 1).type_as(input).to(input.device)
+        grid = grid + flow.permute(0, 2, 3, 1) / norm
+
+        output = F.grid_sample(input, grid)
+        return output

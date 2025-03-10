@@ -32,7 +32,7 @@ def test_parser():
     parser.add_argument('--fusion_method', type=str,
                         default='intermediate',
                         help='no, no_w_uncertainty, late, early or intermediate')
-    parser.add_argument('--save_vis_interval', type=int, default=40,
+    parser.add_argument('--save_vis_interval', type=int, default=20,
                         help='interval of saving visualization')
     parser.add_argument('--save_npy', action='store_true',
                         help='whether to save prediction and gt result'
@@ -130,7 +130,7 @@ def main():
 
     
     infer_info = opt.fusion_method + opt.note
-
+    comm_rate = []
     print(f"==={infer_info}===")
     for i, batch_data in tenumerate(data_loader):
         # print(f"{infer_info}_{i}") #
@@ -171,6 +171,8 @@ def main():
             pred_box_tensor = infer_result['pred_box_tensor']
             gt_box_tensor = infer_result['gt_box_tensor']
             pred_score = infer_result['pred_score']
+            if 'comm_rate' in infer_result:
+                comm_rate.append(infer_result['comm_rate'])
             if opt.fusion_method == 'no_w_uncertainty':
                 cls_noise = infer_result['cls_noise']
                 uncertainty_tensor = infer_result['uncertainty_tensor']
@@ -255,8 +257,9 @@ def main():
                 #                     hypes['postprocess']['gt_range'],
                 #                     vis_save_path,
                 #                     method='3d',
-                #                     left_hand=left_hand)
-                 
+                #                     # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                #                     pcd_agent_split = [])
+                               
                 vis_save_path = os.path.join(vis_save_path_root, 'bev_%05d.png' % i)
                 simple_vis.visualize(infer_result,
                                     batch_data['ego'][
@@ -264,9 +267,12 @@ def main():
                                     hypes['postprocess']['gt_range'],
                                     vis_save_path,
                                     method='bev',
-                                    left_hand=left_hand)
+                                    left_hand=left_hand,
+                                    # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                                    pcd_agent_split = [])
         torch.cuda.empty_cache()
-
+    comm_rate = sum(comm_rate)/max(1, len(comm_rate))
+    print(f"comm_rate is {comm_rate}")
     _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                 opt.model_dir, infer_info)
     if opt.fusion_method == 'no_w_uncertainty':
