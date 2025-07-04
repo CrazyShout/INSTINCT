@@ -324,6 +324,9 @@ class CQCPInstanceHead(nn.Module):
 
     def predict(self, batch_dict):
         spatial_features_2d = batch_dict['spatial_features_2d'] # B_N, 512, H, W
+        # print("++++++++++++++++++++")
+        # print(spatial_features_2d.shape)
+        # print("+++++++++++++++++++++")
         record_len = batch_dict['record_len'] # 举个例子，batch size == 4时，形如List[2, 2, 2, 2]，表示每个场景样本下的agent数目为2，即一车一路
         batch_size = len(record_len)
         pairwise_t_matrix = batch_dict['pairwise_t_matrix'] # (B_N, L, L, 4, 4)

@@ -23,7 +23,8 @@ COLOR_RGB = [ tuple([int(cc * 255) for cc in matplotlib.colors.to_rgb(c)]) for c
 # COLOR_RGB[4] = tuple([139, 195, 74])
 
 COLOR_RGB[0] = tuple([0, 191, 255])
-COLOR_RGB[1] = tuple([0, 191, 255])
+# COLOR_RGB[1] = tuple([0, 191, 255])
+COLOR_RGB[1] = tuple([255, 100, 0])
 COLOR_RGB[2] = tuple([0, 191, 255])
 COLOR_RGB[3] = tuple([0, 191, 255])
 COLOR_RGB[4] = tuple([0, 191, 255])

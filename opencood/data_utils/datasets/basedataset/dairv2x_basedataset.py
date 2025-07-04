@@ -175,6 +175,10 @@ class DAIRV2XBaseDataset(Dataset):
             data[1]['params']['camera0']['intrinsic'] = load_intrinsic_DAIR_V2X( \
                                             read_json(os.path.join(self.root_dir, 'infrastructure-side/calib/camera_intrinsic/'+str(inf_frame_id)+'.json')))
 
+        # 用于可视化前视摄像头
+        data[0]['vis'] = {}
+        data[0]['vis']['camera0'] = os.path.join(self.root_dir, frame_info["vehicle_image_path"])
+        data[0]['vis']['infra_pic'] = os.path.join(self.root_dir, frame_info["infrastructure_image_path"])
 
         if self.load_lidar_file or self.visualize:
             data[0]['lidar_np'], _ = pcd_utils.read_pcd(os.path.join(self.root_dir,frame_info["vehicle_pointcloud_path"]))

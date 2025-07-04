@@ -12,7 +12,7 @@ from opencood.pcdet_utils.iou3d_nms import iou3d_nms_utils
 from .target_assigner.hungarian_assigner import HungarianMatcher3d, generalized_box3d_iou, \
     box_cxcyczlwh_to_xyxyxy
 from opencood.models.sub_modules.cdn import prepare_for_cdn, dn_post_process
-from opencood.models.sub_modules.TrasIFF_transformer import TransformerInstance,TransformerInstanceV1, MLP, get_clones
+from opencood.models.sub_modules.TrasIFF_transformer import TransformerInstance,TransformerInstanceV1, TransIFFV1, TransformerInstanceV3, MLP, get_clones
 from opencood.models.comm_modules.gaussian import draw_heatmap_gaussian, gaussian_radius
 from opencood.models.comm_modules.gaussian_focal_loss import GaussianFocalLoss
 
@@ -218,6 +218,7 @@ class CQCPInstanceHead(nn.Module):
         # self.mask_predictor = MaskPredictor(self.hidden_channel)
         # self.heatmap_head = HeatMap(self.hidden_channel, self.num_classes)
 
+        # self.transformer = TransformerInstanceV1( # v1是INSTINCT原始版本也是论文中的版本 TransIFFV1
         self.transformer = TransformerInstanceV1(
             d_model=self.hidden_channel, # 256
             nhead=num_heads, # 8

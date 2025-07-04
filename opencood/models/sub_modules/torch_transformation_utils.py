@@ -330,6 +330,16 @@ def warp_affine_simple(src, M, dsize,
                          align_corners=align_corners).to(src)
     return F.grid_sample(src, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
 
+    # B, C, H, W = src.shape
+    # if M.dim() == 2:                 # (2, 3) → (1, 2, 3)
+    #     M = M.unsqueeze(0)
+    # if M.size(0) == 1 and B > 1:     # 单 θ 想同时作用于 B 张图
+    #     M = M.expand(B, -1, -1)
+    # # 其余保持不变
+    # grid = F.affine_grid(M, torch.Size((B, C, dsize[0], dsize[1])),
+    #                      align_corners=align_corners).to(src)
+    # return F.grid_sample(src, grid, mode=mode, align_corners=align_corners)
+
 def warp_affine(
         src, M, dsize,
         mode='bilinear',

@@ -250,17 +250,18 @@ def main():
                 """
                 If you want 3D visualization, uncomment lines below
                 """
-                # vis_save_path = os.path.join(vis_save_path_root, '3d_%05d.png' % i)
-                # simple_vis.visualize(infer_result,
-                #                     batch_data['ego'][
-                #                         'origin_lidar'][0],
-                #                     hypes['postprocess']['gt_range'],
-                #                     vis_save_path,
-                #                     method='3d',
-                #                     # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
-                #                     pcd_agent_split = [])
+                vis_save_path = os.path.join(vis_save_path_root, '3d', '3d_%05d.png' % i)
+                simple_vis.visualize(infer_result,
+                                    batch_data['ego'][
+                                        'origin_lidar'][0],
+                                    hypes['postprocess']['gt_range'],
+                                    vis_save_path,
+                                    method='3d',
+                                    left_hand=left_hand,
+                                    pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                                    # pcd_agent_split = [])
                                
-                vis_save_path = os.path.join(vis_save_path_root, 'bev_%05d.png' % i)
+                vis_save_path = os.path.join(vis_save_path_root, 'bev', 'bev_%05d.png' % i)
                 simple_vis.visualize(infer_result,
                                     batch_data['ego'][
                                         'origin_lidar'][0],
@@ -268,8 +269,8 @@ def main():
                                     vis_save_path,
                                     method='bev',
                                     left_hand=left_hand,
-                                    # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
-                                    pcd_agent_split = [])
+                                    pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                                    # pcd_agent_split = [])
         torch.cuda.empty_cache()
     comm_rate = sum(comm_rate)/max(1, len(comm_rate))
     print(f"comm_rate is {comm_rate}")

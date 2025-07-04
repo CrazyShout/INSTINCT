@@ -161,7 +161,7 @@ def getIntermediatev2augFusionDataset(cls):
             # self.split_info = self.data
             # self.co_data = self.co_idx2info
             # self.db_num = 0
-            self.fade = False # 在最后几个epoch会开启用于调整对于test中的数据分布的适应
+            self.fade = True # 在最后几个epoch会开启用于调整对于test中的数据分布的适应  TODO 为True的时候发现会报错，会导致问题协同训练warp feature报错
             if self.train is False:
                 self.fade = True # 如果不在训练状态，即在验证以及测试阶段，那会关闭data augment 此时fade必须为True从而避免获取一些根本无法获取的data augment数据
             if self.fade:
@@ -939,6 +939,8 @@ def getIntermediatev2augFusionDataset(cls):
                     ego_id = cav_id
                     ego_lidar_pose = cav_content['params']['lidar_pose']
                     ego_cav_base = cav_content
+                    camera0_file = cav_content['vis']['camera0']
+                    infra_pic_file = cav_content['vis']['infra_pic']
                     break
                 
             assert cav_id == list(base_data_dict.keys())[
@@ -1197,6 +1199,8 @@ def getIntermediatev2augFusionDataset(cls):
                 # 'anchor_box': self.anchor_box,
                 # 'label_dict': label_dict,
                 'cav_num': cav_num,
+                'camera0_file': camera0_file, # 可视化前摄用的
+                'infra_pic_file': infra_pic_file,
                 'pairwise_t_matrix': pairwise_t_matrix,
                 'lidar_poses_clean': lidar_poses_clean,
                 'lidar_poses': lidar_poses})
@@ -1385,6 +1389,8 @@ def getIntermediatev2augFusionDataset(cls):
                                         transformation_matrix_clean_torch,})
 
             output_dict['ego'].update({
+                'camera0_file': batch[0]['ego']['camera0_file'], # 可视化前摄用的
+                'infra_pic_file': batch[0]['ego']['infra_pic_file'],
                 "sample_idx": batch[0]['ego']['sample_idx'],
                 "cav_id_list": batch[0]['ego']['cav_id_list']
             })

@@ -1,4 +1,4 @@
-name: dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_malbevend
+name: dairv2x_CQCPInstance_lidar_intermediate_fusion_500q_secondres_augment_onecycle_gaussianmask_malcost2.0_soloboxes_pretrained
 data_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure"
 root_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/train.json"
 validate_dir: "my_dair-v2x/v2x_c/cooperative-vehicle-infrastructure/val.json"
@@ -8,7 +8,7 @@ class_names: ['Car']
 
 yaml_parser: "load_second_params"
 train_params:
-  batch_size: &batch_size 6
+  batch_size: &batch_size 18
   epoches: 60
   eval_freq: 1
   save_freq: 1
@@ -21,8 +21,19 @@ label_type: 'lidar'
 comm_range: 100
 only_vis_ego: true
 
+is_single_pre_trained:
+  pre_train_flag: True
+  pre_train_fix: True 
+  # pre_train_path: /public/home/lilingzhi/xyj/CoAlign/opencood/logs/dairv2x/dairv2x_ConQueR_lidar_late_fusion_second_onecycle_2025_01_03_01_58_14/
+  # pre_train_path: /public/home/lilingzhi/xyj/CoAlign/opencood/logs/dairv2x/dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_clscost2.0_2025_01_12_12_27_08/ # ConQueR单车最佳的模型
+  pre_train_path: /public/home/lilingzhi/xyj/CoAlign/opencood/logs/dairv2x/dairv2x_ConQueR_lidar_late_fusion_secondres_onecycle_malbevend_500queries_2025_05_11_15_05_40/ # 使用MAL Loss 在decoder 最后一层
+  # pre_train_path: /public/home/lilingzhi/xyj//CoAlign/opencood/logs/dairv2x/dairv2x_ConQueRQS_lidar_late_fusion_secondres_onecycle_malbevend_2025_01_31_16_21_21/ # Quality based select
+
+  pre_train_epoch: 59
+  # pre_train_epoch: 58 # QS based
+
 fusion:
-  core_method: 'latev2'
+  core_method: 'intermediatev2aug'
   dataset: 'dairv2x'
   args: []
 
@@ -97,9 +108,10 @@ postprocess:
 
 # model related
 model:
-  core_method: conquer_second
+  core_method: second_boxattention_cqcp
   args:
     train_flag: True
+    supervise_single: True
     # grid_size: [2016, 800, 50] 载入yaml时覆写入
     voxel_size: *voxel_size
     lidar_range: *cav_lidar
@@ -124,22 +136,23 @@ model:
         num_filters: [ 128, 256 ]
         upsample_strides: [ 1, 2 ]
         num_upsample_filter: [ 256, 256 ]
-
         resnet: True
         inplanes: 256
+
     dense_head:
-        name: ConQueRHead
+        name: CQCPHead
 
         class_agnostic: True # 类别无关 所有label合一
         feature_map_stride: 8
 
-        num_queries: 300
+        num_queries: 500
         input_features: 512
         hidden_channel: 256
         num_heads: 8
-        dropout: 0.1
+        dropout: 0.3
         activation: 'gelu'
         ffn_channel: 256
+        num_encoder_layers: 3
         num_decoder_layers: 3
         cp: True
         keep_ratio: 0.3 # 这个是计算前景预测时候保留的比例
@@ -189,6 +202,31 @@ model:
       dim: [ 256 ]
       input_dim: 384 # 128 * 3
 
+# # optimizer:
+# #   core_method: AdamW
+# #   lr: 1e-5
+# #   args:
+# #     eps: 1e-10
+# #     weight_decay: 1e-2
+
+# # lr_scheduler:
+# #   core_method: fade
+# #   max_lr: 1e-4  # Set to the desired max learning rate for the fade-in phase
+# #   fade_in_ratio: 0.3  # Ratio of steps for the fade-in phase
+# #   fade_out_ratio: 0.7  # Ratio of steps for the fade-out phase
+
+# optimizer:
+#   core_method: AdamW
+#   lr: 1e-4
+#   args:
+#     eps: 1e-10
+#     weight_decay: 1e-2
+
+# lr_scheduler:
+#   core_method: Exponential #step, multistep and Exponential support
+#   gamma: 0.9
+#   #step_size: [20, 35]
+
 optimizer:
   core_method: adam_onecycle
   args:
@@ -200,3 +238,4 @@ lr_scheduler:
   moms: [0.95, 0.85]
   div_factor: 10
   pct_start: 0.4
+

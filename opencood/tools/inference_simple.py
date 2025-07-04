@@ -8,6 +8,7 @@ import time
 from typing import OrderedDict
 import importlib
 import torch
+import shutil
 import open3d as o3d
 from torch.utils.data import DataLoader, Subset
 import numpy as np
@@ -68,7 +69,7 @@ def test_parser():
     parser.add_argument('--fusion_method', type=str,
                         default='intermediate',
                         help='no, no_w_uncertainty, late, early or intermediate')
-    parser.add_argument('--save_vis_interval', type=int, default=20,
+    parser.add_argument('--save_vis_interval', type=int, default=1,
                         help='interval of saving visualization')
     parser.add_argument('--save_npy', action='store_true',
                         help='whether to save prediction and gt result'
@@ -258,6 +259,21 @@ def main():
                 if not os.path.exists(vis_save_path_root):
                     os.makedirs(vis_save_path_root)
 
+                # if 'camera0_file' in  batch_data['ego']:
+                #     vis_save_path = os.path.join(vis_save_path_root, 'ego')
+                #     if not os.path.exists(vis_save_path):
+                #         os.makedirs(vis_save_path)
+                #     camera0_file = batch_data['ego']['camera0_file']
+                #     camera0_save_path = os.path.join(vis_save_path, 'camera_%05d.png' % i)
+                #     shutil.copy(camera0_file, camera0_save_path)
+                # if 'infra_pic_file' in  batch_data['ego']:
+                #     vis_save_path = os.path.join(vis_save_path_root, 'agent1')
+                #     if not os.path.exists(vis_save_path):
+                #         os.makedirs(vis_save_path)
+                #     camera0_file = batch_data['ego']['infra_pic_file']
+                #     camera0_save_path = os.path.join(vis_save_path, 'camera_%05d.png' % i)
+                #     shutil.copy(camera0_file, camera0_save_path)
+
                 """
                 If you want 3D visualization, uncomment lines below
                 """
@@ -269,21 +285,32 @@ def main():
                 #                     vis_save_path,
                 #                     method='3d',
                 #                     left_hand=left_hand,
-                #                     pcd_agent_split = [])
+                #                     pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
                  
-                vis_save_path = os.path.join(vis_save_path_root, 'bev_%05d.png' % i)
-                simple_vis.visualize(infer_result,
-                                    batch_data['ego'][
-                                        'origin_lidar'][0],
-                                    hypes['postprocess']['gt_range'],
-                                    vis_save_path,
-                                    method='bev',
-                                    left_hand=left_hand,
-                                    # pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
-                                    pcd_agent_split = [])
+                # vis_save_path = os.path.join(vis_save_path_root, 'bev_%05d.png' % i)
+                # simple_vis.visualize(infer_result,
+                #                     batch_data['ego'][
+                #                         'origin_lidar'][0],
+                #                     hypes['postprocess']['gt_range'],
+                #                     vis_save_path,
+                #                     method='bev',
+                #                     left_hand=left_hand,
+                #                     pcd_agent_split = batch_data['ego']['origin_lidar_splitnum'][0])
+                #                     # pcd_agent_split = [])
         torch.cuda.empty_cache()
-    com_num_avg = sum(com_num_all)/max(len(com_num_all), 1)
-    print(f"=== avg comm query num is {com_num_avg} ===")
+    if len(com_num_all) > 0:
+        com_num_all = np.array(com_num_all)
+        com_num_avg = np.mean(com_num_all)
+        com_num_min = np.min(com_num_all)
+        com_num_max = np.max(com_num_all)
+        com_num_std = np.std(com_num_all)
+        com_num_median = np.median(com_num_all)
+        # com_num_avg = sum(com_num_all)/max(len(com_num_all), 1)
+        print(f"=== avg comm query num is {com_num_avg} ===")
+        print(f"=== min comm query num is {com_num_min} ===")
+        print(f"=== max comm query num is {com_num_max} ===")
+        print(f"=== std comm query num is {com_num_std} ===")
+        print(f"=== median comm query num is {com_num_median} ===")
     _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                 opt.model_dir, infer_info)
     if opt.fusion_method == 'no_w_uncertainty':
