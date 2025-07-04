@@ -19,13 +19,13 @@ The data preparation is also the same as that of CoAlign and [OpenCOOD](https://
 
 ## Quick Start
 
-### Train your CoEPFT.
+### Train the model.
 To quickly train your own INSTINCT, please run the following commond:
 ```
 python opencood/tools/train_simple.py -y dairv2x opencood/lidar_only_with_noise/second_CQCPInstance_onecycle.yaml
 ```
 
-### Test the model
+### Test the model.
 Suppose your trained INSTINCT is saved in `#your_INSTINCT_path`, and then run this command:
 
 ```
