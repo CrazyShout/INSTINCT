@@ -4,3 +4,11 @@ tensorboardX
 shapely
 einops
 imageio
+open3d
+icecream
+opencv-python
+pypcd
+pypcd2
+scikit-image
+SharedArray
+numba==0.48.0
