@@ -15,7 +15,13 @@ def make_cuda_ext(name, module, sources):
 setup(
     name='pcd utils',
     cmdclass={'build_ext': BuildExtension},
-    ext_modules=[make_cuda_ext(
+    ext_modules=[
+        make_cuda_ext(name='box_attn_cuda',
+                      module='opencood.pcdet_utils.box_attention',
+                      sources=['src/box_attn_kernel.cu',
+                               'src/box_attn.cpp'
+                               ]),
+        make_cuda_ext(
                 name='iou3d_nms_cuda',
                 module='opencood.pcdet_utils.iou3d_nms',
                 sources=[

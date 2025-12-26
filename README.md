@@ -9,7 +9,51 @@ Collaborative perception systems overcome single-vehicle limitations in long-ran
 
 ## Installation
 
-You can refer to the CoAlign Installation Guide [Chinese Ver.](https://udtkdfu8mk.feishu.cn/docx/LlMpdu3pNoCS94xxhjMcOWIynie) or [English Ver.](https://udtkdfu8mk.feishu.cn/docx/SZNVd0S7UoD6mVxUM6Wc8If6ncc) to learn how to install this repo. 
+First, clone the repo:
+```
+git clone https://github.com/CrazyShout/INSTINCT.git
+```
+
+Next we create a conda environment and install the requirements.
+```
+conda create -n instinct python=3.7.16
+activate instinct
+```
+
+Install the requirements:
+```
+pip install torch==1.12.0 torchvision==0.13.0 torchaudio==0.12.0 --index-url https://download.pytorch.org/whl/cu116
+pip install spconv-cu116
+pip install -r requirements.txt
+```
+
+Build and install other packages:
+```
+python setup.py develop
+
+# gpu is required
+python opencood/utils/setup.py build_ext --inplace
+
+python opencood/pcdet_utils/setup.py build_ext --inplace 
+```
+if you meet problems while building pcdet_utils, please try to comment following codes in `opencood\pcdet_utils\pointnet2`, `opencood\pcdet_utils\roiaware_pool3d` and `opencood\pcdet_utils\iou3d_nms`:
+```
+#include <THC/THC.h>
+......
+extern THCState *state;
+
+# comment all of them
+// #include <THC/THC.h>
+......
+// extern THCState *state;
+```
+Install OpenPCDet
+```
+# OpenPCDet is required.
+git clone https://github.com/open-mmlab/OpenPCDet.git
+cd ../OpenPCDet
+python setup.py develop
+```
 
 
 ## Data Preparation
